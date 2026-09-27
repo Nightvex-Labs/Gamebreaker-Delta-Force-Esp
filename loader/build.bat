@@ -20,7 +20,7 @@ if errorlevel 1 (
 pushd "%~dp0"
 if not exist build mkdir build
 
-set SRC=src\main.c src\log.c src\dh_mz_wipe.c src\dh_item_catalog.c src\db\dh_dbunpack.c src\svc\dh_scm.c src\winio\dh_phys.c src\winio\dh_prov_registry.c src\winio\dh_prov_impl.c src\mem\dh_rpm.c src\decrypt\dh_ace_decrypt.c src\decrypt\dh_vtbl_decrypt.c src\decrypt\dh_c280_decrypt.c src\decrypt\dh_unicorn_decrypt.c src\decrypt\dh_state_cache.c src\decrypt\dh_spray.c src\decrypt\dh_derive_key.c src\overlay\dh_overlay.cpp src\overlay\dh_overlay_imgui.cpp src\overlay\dh_daemon_esp.c src\hollow\dh_hollow.c src\hardening\dh_amsi_etw.c src\hardening\dh_syscalls.c src\hardening\dh_auth.c
+set SRC=src\main.c src\log.c src\dh_mz_wipe.c src\dh_diag.c src\dh_item_catalog.c src\db\dh_dbunpack.c src\svc\dh_scm.c src\winio\dh_phys.c src\winio\dh_prov_registry.c src\winio\dh_prov_impl.c src\mem\dh_rpm.c src\decrypt\dh_ace_decrypt.c src\decrypt\dh_vtbl_decrypt.c src\decrypt\dh_c280_decrypt.c src\decrypt\dh_unicorn_decrypt.c src\decrypt\dh_state_cache.c src\decrypt\dh_spray.c src\decrypt\dh_derive_key.c src\overlay\dh_overlay.cpp src\overlay\dh_overlay_imgui.cpp src\overlay\dh_daemon_esp.c src\hollow\dh_hollow.c src\hardening\dh_amsi_etw.c src\hardening\dh_syscalls.c src\hardening\dh_auth.c
 set IMGUI=deps\imgui\imgui.cpp deps\imgui\imgui_draw.cpp deps\imgui\imgui_tables.cpp deps\imgui\imgui_widgets.cpp deps\imgui\backends\imgui_impl_win32.cpp deps\imgui\backends\imgui_impl_dx11.cpp
 set ASM=src\decrypt\vtbl_call_wrap.asm
 set ASM2=src\decrypt\vtbl_spray_wrap.asm

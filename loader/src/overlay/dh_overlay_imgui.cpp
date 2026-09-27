@@ -572,9 +572,98 @@ static bool init_d3d()
 // team_color removed — colors now come from user-picked per-entity-type
 // palette in DH_UI.col_player_* / col_bot_*.
 
-// Top-level exception filter â€” writes crash context to log before process
-// dies so we know what killed us (address, exception code, stage flag).
+// Top-level exception filter â€” writes crash context to log + drops
+// %TEMP%\.dh_crash_meta (text) + %TEMP%\.dh_crash_dump.dmp (MiniDump) so the
+// launcher stub can upload both after we die.
 static volatile const char* g_last_stage = "init";
+
+static void write_crash_meta(EXCEPTION_POINTERS* ep) {
+    wchar_t p[MAX_PATH];
+    DWORD n = GetTempPathW(MAX_PATH, p);
+    if (!n || n >= MAX_PATH - 32) return;
+    wcscat_s(p, MAX_PATH, L".dh_crash_meta");
+    HANDLE h = CreateFileW(p, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+
+    char line[512]; SYSTEMTIME st; GetLocalTime(&st);
+    int m = _snprintf_s(line, sizeof(line), _TRUNCATE,
+        "time=%04u-%02u-%02uT%02u:%02u:%02u.%03u\r\n"
+        "code=0x%08lX\r\n"
+        "addr=0x%p\r\n"
+        "flags=0x%lX\r\n"
+        "stage=%s\r\n"
+        "pid=%lu\r\n"
+        "params=%lu\r\n",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+        (unsigned long)ep->ExceptionRecord->ExceptionCode,
+        ep->ExceptionRecord->ExceptionAddress,
+        (unsigned long)ep->ExceptionRecord->ExceptionFlags,
+        g_last_stage ? (const char*)g_last_stage : "?",
+        (unsigned long)GetCurrentProcessId(),
+        (unsigned long)ep->ExceptionRecord->NumberParameters);
+    DWORD w = 0; if (m > 0) WriteFile(h, line, (DWORD)m, &w, NULL);
+
+    for (DWORD i = 0; i < ep->ExceptionRecord->NumberParameters && i < 4; i++) {
+        m = _snprintf_s(line, sizeof(line), _TRUNCATE, "param[%lu]=0x%llX\r\n",
+                        i, (unsigned long long)ep->ExceptionRecord->ExceptionInformation[i]);
+        if (m > 0) WriteFile(h, line, (DWORD)m, &w, NULL);
+    }
+
+    // Register context snapshot (RIP + top of stack). Best-effort — dbghelp
+    // sym resolution not attempted here; server side does symbolication.
+    if (ep->ContextRecord) {
+        CONTEXT* c = ep->ContextRecord;
+        m = _snprintf_s(line, sizeof(line), _TRUNCATE,
+            "rip=0x%llX  rsp=0x%llX  rbp=0x%llX\r\n"
+            "rax=0x%llX  rbx=0x%llX  rcx=0x%llX  rdx=0x%llX\r\n"
+            "r8=0x%llX  r9=0x%llX  r10=0x%llX  r11=0x%llX\r\n",
+            (unsigned long long)c->Rip, (unsigned long long)c->Rsp, (unsigned long long)c->Rbp,
+            (unsigned long long)c->Rax, (unsigned long long)c->Rbx, (unsigned long long)c->Rcx, (unsigned long long)c->Rdx,
+            (unsigned long long)c->R8,  (unsigned long long)c->R9,  (unsigned long long)c->R10, (unsigned long long)c->R11);
+        if (m > 0) WriteFile(h, line, (DWORD)m, &w, NULL);
+
+        // Stack backtrace via RtlCaptureStackBackTrace.
+        void* frames[24];
+        USHORT nf = RtlCaptureStackBackTrace(0, 24, frames, NULL);
+        for (USHORT i = 0; i < nf; i++) {
+            m = _snprintf_s(line, sizeof(line), _TRUNCATE,
+                            "bt[%u]=0x%p\r\n", i, frames[i]);
+            if (m > 0) WriteFile(h, line, (DWORD)m, &w, NULL);
+        }
+    }
+    CloseHandle(h);
+}
+
+static void write_minidump(EXCEPTION_POINTERS* ep) {
+    HMODULE dbg = LoadLibraryW(L"dbghelp.dll");
+    if (!dbg) return;
+    typedef BOOL (WINAPI *pfnMDW)(HANDLE, DWORD, HANDLE, ULONG /*type*/,
+                                   void* /*exc*/, void* /*user*/, void* /*callback*/);
+    pfnMDW mdw = (pfnMDW)GetProcAddress(dbg, "MiniDumpWriteDump");
+    if (!mdw) { FreeLibrary(dbg); return; }
+
+    wchar_t p[MAX_PATH];
+    DWORD n = GetTempPathW(MAX_PATH, p);
+    if (!n || n >= MAX_PATH - 32) { FreeLibrary(dbg); return; }
+    wcscat_s(p, MAX_PATH, L".dh_crash_dump.dmp");
+    HANDLE h = CreateFileW(p, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) { FreeLibrary(dbg); return; }
+
+    struct { DWORD tid; EXCEPTION_POINTERS* ep; BOOL client; } eparam;
+    eparam.tid = GetCurrentThreadId();
+    eparam.ep  = ep;
+    eparam.client = FALSE;
+
+    // MiniDumpNormal (0) — small + fast. Add ThreadInfo (0x1000) for CPU state.
+    mdw(GetCurrentProcess(), GetCurrentProcessId(), h,
+        0x0 | 0x1000 /*MiniDumpNormal|WithThreadInfo*/,
+        ep ? &eparam : NULL, NULL, NULL);
+    CloseHandle(h);
+    FreeLibrary(dbg);
+}
+
 static LONG WINAPI dh_unhandled_ex_filter(EXCEPTION_POINTERS* ep)
 {
     DH_ERROR("[CRASH] code=0x%08lX addr=%p flags=0x%lX stage='%s'",
@@ -586,6 +675,8 @@ static LONG WINAPI dh_unhandled_ex_filter(EXCEPTION_POINTERS* ep)
         DH_ERROR("[CRASH]   param[%lu] = 0x%llX",
                  i, (unsigned long long)ep->ExceptionRecord->ExceptionInformation[i]);
     }
+    write_crash_meta(ep);
+    write_minidump(ep);
     return EXCEPTION_EXECUTE_HANDLER;
 }
 

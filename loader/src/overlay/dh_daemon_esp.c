@@ -3088,9 +3088,17 @@ DWORD WINAPI DaemonEspRun_ThreadEntry(LPVOID param)
     return (DWORD)DaemonEspRun(ctx->hDev, ctx->cr3, ctx->base);
 }
 
+extern void dh_diag_line(const char* fmt, ...);
+
 int DaemonEspRun(HANDLE hDev, u64 procCR3, u64 base)
 {
-    if (!create_shmem()) return 1;
+    dh_diag_line("daemon: DaemonEspRun ENTER hDev=%p procCR3=0x%llX base=0x%llX",
+                 hDev, (unsigned long long)procCR3, (unsigned long long)base);
+    if (!create_shmem()) {
+        dh_diag_line("daemon: create_shmem FAILED gle=%lu", (unsigned long)GetLastError());
+        return 1;
+    }
+    dh_diag_line("daemon: shmem OK");
 
     // Publish RPM handles for the fast cam thread.
     g_hDev = hDev; g_procCR3 = procCR3; g_base = base;
@@ -3112,9 +3120,13 @@ int DaemonEspRun(HANDLE hDev, u64 procCR3, u64 base)
     u64 gNamesVA   = base + DF_RVA_GNAMES;
     if (UcDecryptInit(hDev, procCR3, base, gObjectsVA, gNamesVA, 0)) {
         g_uc_ready = 1;
+        dh_diag_line("daemon: UcDecrypt READY @0x%llX (GObjects+GNames resolved)",
+                     (unsigned long long)UcDecryptGetFnVa());
         DH_INFO("Unicorn DecVector emulator ready @0x%llX",
                 (unsigned long long)UcDecryptGetFnVa());
     } else {
+        dh_diag_line("daemon: UcDecrypt FAILED — RPM GObjects sanity fail; enemy decrypt OFF, "
+                     "ESP will show only teammates + plaintext-relevance-group");
         DH_WARN("Unicorn init failed — enemy decrypt disabled, falling back "
                 "to pawn+0x1C2C FRepMovement only");
     }
@@ -3152,6 +3164,26 @@ int DaemonEspRun(HANDLE hDev, u64 procCR3, u64 base)
             double secs = (double)(now_qpc.QuadPart - hzMark.QuadPart) / (double)hzFreq.QuadPart;
             if (secs > 0.001) g_shmem->main_hz = (float)(30.0 / secs);
             hzMark = now_qpc;
+        }
+        // Periodic diag snapshot every 300 ticks (~5-10s) — enemy count,
+        // decrypt state, tick rate. Server side can chart these to spot
+        // "overlay attached but zero enemies for entire raid" broken states.
+        if ((tick % 300) == 0 && tick > 0) {
+            int n_valid = 0, n_local = 0, n_bot = 0, n_alive = 0, n_ready_pos = 0;
+            for (int i = 0; i < DH_MAX_PLAYERS; i++) {
+                DH_SHMEM_PLAYER* p = &g_shmem->players[i];
+                if (!p->valid) continue;
+                n_valid++;
+                if (p->local)  n_local++;
+                if (p->is_bot) n_bot++;
+                if (!p->is_dead) n_alive++;
+                if (p->x != 0.0f || p->y != 0.0f) n_ready_pos++;
+            }
+            dh_diag_line("stats: tick=%u hz=%.1f count=%u valid=%d alive=%d bot=%d local=%d "
+                         "with_pos=%d uc_ready=%d xorps_ready=%d",
+                         tick, g_shmem->main_hz, (unsigned)g_shmem->count,
+                         n_valid, n_alive, n_bot, n_local, n_ready_pos,
+                         g_uc_ready, g_xorps_ready);
         }
         if (stop_ev && WaitForSingleObject(stop_ev, 0) == WAIT_OBJECT_0) {
             DH_INFO("daemon-esp stop signal received");

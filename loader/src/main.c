@@ -22,6 +22,7 @@
 #include "../inc/dh_mz_wipe.h"
 #include "../inc/dh_hollow.h"
 #include "../inc/dh_auth.h"
+#include "../inc/dh_diag.h"
 #include <math.h>
 #include "../inc/dh_rpm.h"
 #include "../inc/dh_ace_decrypt.h"
@@ -3457,13 +3458,25 @@ int wmain(int argc, wchar_t** argv) {
             }
         }
 
+        // Snapshot machine state — server can see who's running what alongside us.
+        dh_diag_line("run: enter argc=%d subsys=WINDOWS ver=dh-1.0.0", argc);
+        dh_diag_start_procs_snapshot_thread();
+
         DH_DRIVER drv;
-        if (!driver_up(&drv)) return DH_ERR_SVC_START;
+        if (!driver_up(&drv)) {
+            dh_diag_line("run: driver_up FAILED — kdu install/load broke (SCM? HVCI?)");
+            return DH_ERR_SVC_START;
+        }
+        dh_diag_line("run: driver_up OK (kdu #6/EneIo64 or #26/REDFOX loaded)");
 
         u64 sysCR3 = 0, procCR3 = 0, eproc = 0, peb = 0, base = 0, size = 0;
         int rc = DH_OK;
         do {
-            if (!RpmFindSystemCR3(drv.hDevice, &sysCR3)) { rc = DH_ERR_RPM_FAIL; break; }
+            if (!RpmFindSystemCR3(drv.hDevice, &sysCR3)) {
+                dh_diag_line("run: RpmFindSystemCR3 FAILED — no valid PSB in low 1MB phys");
+                rc = DH_ERR_RPM_FAIL; break;
+            }
+            dh_diag_line("run: sysCR3=0x%llX", (unsigned long long)sysCR3);
             // Wait up to 120s for Delta to appear — user usually presses Play
             // before launching the game, or the game is still booting. Polls
             // every 1000ms; logs the first miss so the log tells us we waited.
@@ -3481,12 +3494,22 @@ int wmain(int argc, wchar_t** argv) {
             }
             if (!procCR3) {
                 DH_ERROR("run: %s never appeared after 120s", DH_PROC_NAME);
+                dh_diag_line("run: TIMEOUT — DeltaForceClient never appeared in 120s "
+                             "(EPROCESS walk kept failing; likely ACE decoy filter or "
+                             "OS build not in EPROCESS layout table)");
                 rc = DH_ERR_TARGET_NOT_FOUND; break;
             }
+            dh_diag_line("run: %s found procCR3=0x%llX eproc=0x%llX",
+                         DH_PROC_NAME, (unsigned long long)procCR3,
+                         (unsigned long long)eproc);
             RpmRead64(drv.hDevice, sysCR3, eproc + g_eproc_peb_off, &peb);
             if (!RpmGetMainImageBase(drv.hDevice, procCR3, peb, &base, &size)) {
                 base = 0x140000000ULL; size = 0x1F800000;
+                dh_diag_line("run: RpmGetMainImageBase FAILED — falling back to hardcoded base");
             }
+            dh_diag_line("run: Delta base=0x%llX size=0x%llX peb=0x%llX",
+                         (unsigned long long)base, (unsigned long long)size,
+                         (unsigned long long)peb);
             DH_INFO("run: Delta base=0x%llX — spawning daemon+overlay", base);
 
             struct RunCtx { HANDLE hDev; u64 cr3; u64 base; };
@@ -3524,11 +3547,15 @@ int wmain(int argc, wchar_t** argv) {
             // own SetUnhandledExceptionFilter but that path can miss if the
             // fault fires before init reaches the filter registration.
             __try {
+                dh_diag_line("run: OverlayRunImGui start (D3D11+DComp+ImGui)");
                 rc = OverlayRunImGui();
+                dh_diag_line("run: OverlayRunImGui returned rc=%d — window closed cleanly", rc);
                 DH_INFO("run: OverlayRunImGui returned rc=%d", rc);
             } __except (EXCEPTION_EXECUTE_HANDLER) {
                 DH_ERROR("run: OverlayRunImGui crashed code=0x%08lX",
                          (unsigned long)GetExceptionCode());
+                dh_diag_line("run: OverlayRunImGui CRASHED code=0x%08lX (see crash_dump.dmp)",
+                             (unsigned long)GetExceptionCode());
                 rc = DH_ERR_GENERIC;
             }
 

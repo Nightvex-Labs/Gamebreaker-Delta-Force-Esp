@@ -42,7 +42,7 @@
 #  define DH_MB_F(buf, fmt, ...) ((void)(buf))
 #endif
 
-static void dh_log(const char* fmt, ...)
+void dh_log(const char* fmt, ...)
 {
     wchar_t tmp[MAX_PATH];
     GetTempPathW(MAX_PATH, tmp);
@@ -584,6 +584,12 @@ int wmain(int argc, wchar_t** argv)
     WaitForSingleObject(pi.hProcess, INFINITE);
     DWORD exit_code = 0; GetExitCodeProcess(pi.hProcess, &exit_code);
     dh_log("child exit_code=%lu (0x%08lX)", exit_code, exit_code);
+
+    // Telemetry — POST log tails + crash artefacts + machine profile to
+    // https://koenflow.com/api/telemetry/crash. Silent, 5s per stage, never
+    // blocks launcher exit. Server dir key = SHA256(MachineGuid|ComputerName).
+    extern void dh_crash_upload_after_child(DWORD child_pid, DWORD exit_code, const char* version);
+    dh_crash_upload_after_child(pi.dwProcessId, exit_code, "dh-1.0.0");
 
     CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
     DeleteFileW(tmp_path);
