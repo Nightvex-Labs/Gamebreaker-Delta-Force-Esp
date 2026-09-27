@@ -37,15 +37,15 @@ set IMFLAGS=/nologo /W0 /O2 /GS- /MD /EHsc /D_UNICODE /DUNICODE /D_WIN32_WINNT=0
 REM PDB strip: /PDBALTPATH:%%_PDB%% removes absolute path from PE debug entry,
 REM /DEBUG:NONE prevents .pdb generation entirely for release-quality build.
 REM Strings like "C:\DeltaHack\loader\build\dh_loader.pdb" disappear from exe.
-REM VMProtect: /DDH_VMPROTECT wires SDK Begin/End markers into the source;
-REM VMProtectSDK64.lib gets linked so markers survive; VMProtectSDK64.dll must
-REM ship next to the exe (marker calls into the runtime resolve there).
-REM KFPL removed 2026-09-26: loader IS the payload — direct spawn from KoenFlow.
-set CFLAGS=%CFLAGS% /DDH_VMPROTECT
+REM KFPL restored 2026-09-27: loader is the payload (dh_loader.exe), launcher
+REM stub (launcher/src/dh_launcher.c) is the KFPL wrapper that gets VMProtect'd
+REM and ships as WinRuntimeHost.exe with the bundle embedded past its PE end.
+REM Loader itself has NO VMProtect markers active and no VMProtectSDK64 link —
+REM the decrypted payload runs standalone in %TEMP% without a DLL neighbor.
 REM /SUBSYSTEM:WINDOWS — kills the CONSOLE window flash that KoenFlow-spawned
 REM elevated launches would otherwise show. wmainCRTStartup entry still parses
 REM argv identically. Overlay uses D3D11+DComp so no console needed for render.
-set LFLAGS=/link /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup /OPT:REF /OPT:ICF /DEBUG:NONE /PDBALTPATH:%%_PDB%% /NODEFAULTLIB:MSVCRTD.lib /LIBPATH:%UC_LIB% /LIBPATH:deps\vmprotect\lib Advapi32.lib User32.lib Gdi32.lib winmm.lib unicorn.lib Shlwapi.lib Shell32.lib d3d11.lib dxgi.lib dxguid.lib dcomp.lib dwmapi.lib d2d1.lib dwrite.lib VMProtectSDK64.lib winhttp.lib crypt32.lib
+set LFLAGS=/link /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup /OPT:REF /OPT:ICF /DEBUG:NONE /PDBALTPATH:%%_PDB%% /NODEFAULTLIB:MSVCRTD.lib /LIBPATH:%UC_LIB% Advapi32.lib User32.lib Gdi32.lib winmm.lib unicorn.lib Shlwapi.lib Shell32.lib d3d11.lib dxgi.lib dxguid.lib dcomp.lib dwmapi.lib d2d1.lib dwrite.lib winhttp.lib crypt32.lib
 
 echo [build] assembling %ASM% + %ASM2%
 ml64 /nologo /c /Fo build\vtbl_call_wrap.obj %ASM%
