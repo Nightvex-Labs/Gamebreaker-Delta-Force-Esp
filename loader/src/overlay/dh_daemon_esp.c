@@ -1319,22 +1319,22 @@ static void poll_and_publish(HANDLE hDev, u64 procCR3, u64 base)
         if (!gotPos) continue;
         (void)root;
 
-        // Distance sanity vs local player — decrypt garbage passes the
-        // absolute-bounds filter (fits in +/-200000) but lands 10-100+ km
-        // away from us, producing the "boxes miss" bug when uc_ready=0 and
-        // the VTBL Feistel fallback returns a plausible-but-wrong point.
-        // Delta maps top out ~4-5 km wide → anything > 6000 m from local
-        // player position is decrypt-broken garbage, skip.
-        //
-        // Skip check for local + when we don't yet have our own position
-        // (first frames until haveMy is set).
-        if (!isLocal && g_shmem->myX != 0.0f && g_shmem->myY != 0.0f) {
+        // Distance sanity vs local player — ONLY when UcDecrypt is not ready
+        // and we're falling back to VTBL Feistel-20 shellcode. That path
+        // occasionally returns positions that pass the absolute-bounds check
+        // (fits in +/-200000) but land 10-100+ km away from us — the "boxes
+        // miss" bug users saw. When uc_ready=1 the Unicorn emulator returns
+        // exact game-truth coords; skip the filter so we don't cut off legit
+        // enemies on large maps (Zero Dam Extended can span >8 km).
+        if (!isLocal && !g_uc_ready && g_shmem->myX != 0.0f && g_shmem->myY != 0.0f) {
             float _dxm = px - g_shmem->myX;
             float _dym = py - g_shmem->myY;
             float _dzm = pz - g_shmem->myZ;
             float _dist2 = _dxm*_dxm + _dym*_dym + _dzm*_dzm;
-            // 6000m in Delta units (1 unit = 1 cm) = 600000 cm; squared = 3.6e11
-            if (_dist2 > 3.6e11f) continue;
+            // 10 km in Delta units (1 uu = 1 cm) = 1e6 cm; squared = 1e12.
+            // Wider than earlier 6 km because Delta's Zero Dam Extended
+            // legit-spans that.
+            if (_dist2 > 1.0e12f) continue;
         }
 
         // SKELETON REMOVED 2026-09-26 — was one-shot mesh/refBoneInfo dump
@@ -3183,6 +3183,88 @@ int DaemonEspRun(HANDLE hDev, u64 procCR3, u64 base)
             if (secs > 0.001) g_shmem->main_hz = (float)(30.0 / secs);
             hzMark = now_qpc;
         }
+        // ── Decrypt-stuck watchdog ────────────────────────────────────────
+        // Snapshot non-local enemy positions every ~5s. If NONE of them
+        // moved more than 1 unit for a full 20s window while we're clearly
+        // in a raid (>=2 non-local valid + local Z in raid range, NOT the
+        // lobby's extreme low Z), decrypt/actor-scan is stuck → hard reset
+        // all player caches so the next tick re-scans and re-decrypts
+        // fresh state. Local player standing still won't trigger reset —
+        // check applies only to non-local enemies.
+        if ((tick % 600) == 0 && tick > 0) {
+            static struct { float x, y, z; u64 pawn; } s_snap[DH_MAX_PLAYERS] = {0};
+            static u64  s_snap_ts = 0;
+            static int  s_snap_count = 0;
+
+            // "In raid" heuristic — count non-local valid + check local Z.
+            int nonlocal_valid = 0;
+            for (int i = 0; i < DH_MAX_PLAYERS; i++) {
+                DH_SHMEM_PLAYER* p = &g_shmem->players[i];
+                if (p->valid && !p->local) nonlocal_valid++;
+            }
+            float mz = g_shmem->myZ;
+            int in_raid = (nonlocal_valid >= 2) && (mz > -3000.0f && mz < 8000.0f);
+
+            u64 now_ms = GetTickCount64();
+            if (!in_raid) {
+                // Lobby / loading — reset watchdog window, don't trip.
+                s_snap_ts = now_ms;
+                s_snap_count = 0;
+            } else {
+                // Compare current with snapshot.
+                int changed = 0, checked = 0;
+                for (int i = 0; i < DH_MAX_PLAYERS && i < s_snap_count; i++) {
+                    DH_SHMEM_PLAYER* p = &g_shmem->players[i];
+                    if (!p->valid || p->local) continue;
+                    // Match by pawn — slot indices can shift between snaps.
+                    for (int j = 0; j < DH_MAX_PLAYERS; j++) {
+                        if (s_snap[j].pawn == p->pawn && s_snap[j].pawn != 0) {
+                            float d = fabsf(p->x - s_snap[j].x)
+                                    + fabsf(p->y - s_snap[j].y)
+                                    + fabsf(p->z - s_snap[j].z);
+                            checked++;
+                            if (d > 1.0f) changed++;
+                            break;
+                        }
+                    }
+                }
+
+                if (checked > 0 && changed == 0 && (now_ms - s_snap_ts) >= 20000) {
+                    // ALL enemies frozen 20+s in raid — decrypt stuck. Reset.
+                    dh_diag_line("watchdog: %d non-local enemies frozen for %llu ms in raid "
+                                 "(uc=%d vtbl=%d xorps=%d myZ=%.0f) — RESETTING caches",
+                                 checked, (unsigned long long)(now_ms - s_snap_ts),
+                                 g_uc_ready, g_vtbl_ready, g_xorps_ready, mz);
+
+                    // Clear all shmem player slots so overlay stops drawing
+                    // stale boxes while re-scan runs.
+                    for (int i = 0; i < DH_MAX_PLAYERS; i++) {
+                        g_shmem->players[i].valid = 0;
+                        g_shmem->players[i].pawn  = 0;
+                    }
+                    g_shmem->count = 0;
+                    // Reset watchdog window so we don't loop.
+                    s_snap_ts = now_ms;
+                    s_snap_count = 0;
+                } else if (changed > 0 || checked == 0) {
+                    // Fresh baseline — snapshot current positions.
+                    memset(s_snap, 0, sizeof(s_snap));
+                    int n = 0;
+                    for (int i = 0; i < DH_MAX_PLAYERS && n < DH_MAX_PLAYERS; i++) {
+                        DH_SHMEM_PLAYER* p = &g_shmem->players[i];
+                        if (!p->valid || p->local) continue;
+                        s_snap[n].x = p->x;
+                        s_snap[n].y = p->y;
+                        s_snap[n].z = p->z;
+                        s_snap[n].pawn = p->pawn;
+                        n++;
+                    }
+                    s_snap_count = n;
+                    s_snap_ts = now_ms;
+                }
+            }
+        }
+
         // Periodic diag snapshot every 300 ticks (~5-10s) — enemy count,
         // decrypt state, tick rate. Server side can chart these to spot
         // "overlay attached but zero enemies for entire raid" broken states.
