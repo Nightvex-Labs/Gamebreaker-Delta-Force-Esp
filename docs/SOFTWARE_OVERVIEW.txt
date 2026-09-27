@@ -1,0 +1,263 @@
+DeltaHack — Software architecture overview
+============================================
+Author: Byte
+Date:   2026-09-21
+Target: Delta Force 1.102.37117.80 (UE 4.24.2, ACE + SGuard64)
+
+--------------------------------------------------------------------
+1. WHAT THIS SOFTWARE DOES
+--------------------------------------------------------------------
+DeltaHack is a 2-PC external ESP for Delta Force. PC1 is the dev
+box (source, IDA, SDK, build). 2PC (192.168.31.250) runs the game
+and executes the compiled loader under HVCI ON, Hyper-V ON,
+Secure Boot ON. Nothing is injected into the game process.
+
+The loader (dh_loader.exe) does three jobs, chosen by argv[1]:
+
+  daemon-esp     runs as SYSTEM in Session 0; owns the kdu driver
+                 handle, reads Delta at 100 Hz via external RPM,
+                 publishes world state to Global\DeltaHackEsp.
+  overlay-imgui  runs as the interactive user in Session 1; opens
+                 an ImGui panel + DirectComposition overlay window
+                 on top of the game; reads shmem and renders ESP.
+  overlay        legacy D2D overlay path, kept as fallback.
+  (many more)    RPM/probe/decrypt utility subcommands used
+                 during development — see main.c argv dispatch.
+
+The two Session 0 / Session 1 halves are launched via two named
+scheduled tasks (`DeltaHackTest` for the daemon, `DeltaHackOverlay`
+for the overlay). autostart.bat only keeps sshd alive across
+reboots; the daemon is not autostarted.
+
+--------------------------------------------------------------------
+2. LAYOUT ON DISK (PC1)
+--------------------------------------------------------------------
+C:\DeltaHack\
+  loader\
+    build\dh_loader.exe        the produced binary
+    build.bat                  one-shot MSVC build (uses vcvars)
+    inc\                       shared C headers (dh_shmem.h,
+                               dh_rpm.h, dh_common.h, ...)
+    src\
+      main.c                   argv dispatcher (SCM, kdu load,
+                               subcommand routing)
+      log.c                    tiny thread-safe printf logger
+      mem\dh_rpm.c             external RPM primitives (all reads
+                               go through this)
+      winio\                   kdu WinIo transport (dh_phys.c),
+                               provider registry, dh_prov_impl.c
+      svc\dh_scm.c             service create/start/stop wrapper
+      db\dh_dbunpack.c         DBPACK decode for kdu driver bins
+      decrypt\                 FEncVector position decrypt suite
+                               (dh_vtbl_decrypt, spray, unicorn,
+                                dh_c280_decrypt, dh_state_cache,
+                                dh_derive_key)
+      overlay\
+        dh_daemon_esp.c        the SYSTEM daemon: actor walk,
+                               position decrypt, HP + armor +
+                               skeleton reads, shmem publish
+        dh_overlay_imgui.cpp   the interactive overlay: reads
+                               shmem, ImGui panel, W2S draw,
+                               skeleton edges, armor row
+        dh_overlay.cpp         legacy D3D11+DirectComposition
+                               overlay (kept as fallback)
+  kdu\                         kdu source tree + drivers (bins are
+                               packed in loader as .kfpl blobs)
+  sdk\                         Dumper-7 SDK snapshots per date
+  docs\                        design + status docs (this file,
+                               SKELETON_NOTES.txt, ARMOR_STATUS.txt)
+  tools\ssh\                   config + ed25519 key + known_hosts
+                               for `ssh 2pc` / `scp -F ... 2pc:...`
+  scripts\                     packing helpers
+  launcher\                    KFPL wrapper (ship variant, AES-
+                               GCM-encrypted dh_loader inside a
+                               launcher exe)
+
+--------------------------------------------------------------------
+3. DAEMON PIPELINE (dh_daemon_esp.c)
+--------------------------------------------------------------------
+poll_and_publish() runs at ~100 Hz. Each tick:
+
+  a) Resolve GWorld:
+        base + DF_RVA_GWORLD (0x1DA98608)   -> UWorld*
+        uworld + 0x140                       -> GameState (encrypted)
+        gs    + 0x388                        -> TArray<APlayerState*>
+
+  b) For each PlayerState:
+        ps + 0x3F8   -> APawn* (encrypted -> mask)
+        ps + 0x660   -> TeamID
+        ps + 0x94C   -> CurrentCharacterLiveStatus
+                        (1=Alive 2=Dead 3=Knocked)
+
+  c) For each pawn we care about:
+        pawn + 0x180  root scene component (encrypted)
+        pawn + 0x3D0  USkeletalMeshComponent (encrypted)
+        pawn + 0x10B8 HealthComponent (encrypted)
+                       hc + 0x280 -> UGPAttributeSetHealth
+                                     hs + 0x3C  Health.CurrentValue
+                                     hs + 0x54  MaxHealth.CurrentValue
+        pawn + 0xE68  CapsuleHalfHeight (base)
+        pawn + 0x480/0x7A0/0x1B48  stance flags
+        pawn + 0x1D10 LastFrameWorldPosition (encrypted, VTBL_DECRYPT_120)
+        pawn + 0x3A8  ControlRotation source (for cam)
+        pawn + 0x3B0  PlayerState back-ref
+        pawn + 0x3960 CharacterEquipComponent (armor path,
+                       currently local-only — see ARMOR_STATUS.txt)
+
+  d) Local-pawn discovery:
+        uworld + 0x190 -> GameInstance
+        gi     + 0x38  -> LocalPlayers[0]
+        lp     + 0x30  -> PlayerController
+        pc     + 0x3F0 -> AcknowledgedPawn
+        pc     + 0x408 -> PlayerCameraManager
+        pcm    + 0x31DB0 -> POV (FEncryptedVector)
+        Local pawn is what identifies teammates (same TeamID) and
+        the local cam feeds the cam-thread cache g_cam_cache.
+
+  e) Actor walker (bots):
+        uworld + 0x190 (PersistentLevel? no — via world levels)
+        level + 0x98 / +0xA0 -> Actors TArray Data / Num
+        Level.Actors scanned every 250 ms for new bots; live bots
+        are polled every tick from a small per-pawn cache.
+
+  f) Skeleton via CachedComponentSpaceTransforms:
+        mesh + one of {0xEB8, 0xEC8, 0xED8, 0xEE8, ...}
+        See docs/SKELETON_NOTES.txt for the full formula (feet
+        anchor, yaw compensation, ComponentToWorld path).
+
+  g) Armor via CharacterEquipComponent:
+        pawn + 0x3960 -> comp -> comp + 0x1E8 TArray<FArmorInfo>
+        See docs/ARMOR_STATUS.txt.
+
+  h) Everything above lands in DH_SHMEM at Global\DeltaHackEsp
+     under a spinlock (odd sequence == writer in progress).
+     The camera thread updates yaw/pitch/roll/fov under a
+     separate cam_seq so the overlay reads fresh cam data at
+     ~250 Hz without waiting for the slower entity walker.
+
+--------------------------------------------------------------------
+4. OVERLAY (dh_overlay_imgui.cpp)
+--------------------------------------------------------------------
+Renders through a WS_EX_LAYERED transparent DXGI window using ImGui
+BackgroundDrawList. Every frame:
+
+  a) Grab a snapshot of DH_SHMEM under sequence lock (seqlock
+     retry pattern; camera fields honour cam_seq separately).
+  b) Compute view matrix from cam yaw/pitch/roll and fov.
+  c) For each valid player slot:
+        - is_teammate = e.team == myTeam
+        - Filter by tab toggles (players / bots / distance)
+        - W2S the actor.Location and top-of-head point
+        - Draw 2D box (perspective from cap_hh/cap_r/dist)
+        - Header rows above the box: nickname + team, HP, armor
+          (armor uses helmet_tier/armor_tier + durability)
+        - Skeleton lines (enemy players only) via
+          bone_parents_num edges, forbidden index mask
+        - Distance below the box (m)
+        - Status banner (KNOCKED / DEAD)
+
+Panel (Home hotkey) has tabs: Players, Bots, Radar, Overlay,
+Settings. Colours picked per group; per-row toggles let user hide
+individual fields.
+
+--------------------------------------------------------------------
+5. BUILD AND DEPLOY
+--------------------------------------------------------------------
+Build on PC1:
+    cmd //c "C:\DeltaHack\loader\build.bat"
+    -> produces C:\DeltaHack\loader\build\dh_loader.exe (~28 MB)
+
+Deploy to 2PC (both processes must be killed first because the
+scheduled tasks restart on failure):
+
+    ssh 2pc "cmd /c taskkill /F /IM dh_loader.exe"
+    scp .../dh_loader.exe 2pc:C:/DeltaHack/loader/build/dh_loader.exe
+    ssh 2pc "powershell -File C:\DeltaHack\start_all.ps1"
+
+Since exe is often locked by task auto-restart, a safer pattern is:
+    1. scp to a temp name (dh_loader_new.exe)
+    2. Stop-ScheduledTask both tasks + Stop-Process
+    3. Move-Item _new -> real name
+    4. Start-ScheduledTask both tasks
+
+Prebuilt helpers:
+    C:\DeltaHack\deploy\2pc\install_2pc.ps1
+    C:\DeltaHack\loader\src\overlay\clean_restart.ps1
+
+--------------------------------------------------------------------
+6. KEY OFFSETS QUICK REFERENCE
+--------------------------------------------------------------------
+See docs/SKELETON_NOTES.txt for the full skeleton chain. Everything
+else that matters this session:
+
+pawn (AGPCharacter, ADFMPlayerCharacter subclass):
+    +0x180   RootComponent           encrypted
+    +0x1D10  LastFrameWorldPosition  encrypted vector (VTBL_DECRYPT_120)
+    +0x3A8   ControlRotation source
+    +0x3B0   PlayerState back-ref
+    +0x3D0   Mesh                    encrypted
+    +0x3F0   AcknowledgedPawn (on PC)
+    +0x480   crouch flag byte (bit0)
+    +0x7A0   proned int32
+    +0x1B48  ECharacterLogicPoseType
+    +0x10B8  HealthComponent         encrypted
+    +0x1D10  LastFrameWorldPosition  (dup entry for clarity)
+    +0x3960  CharacterEquipComponent encrypted  (armor)
+    +0x24E0  CharacterEquipComponentCache encrypted (mirror)
+    +0x0390  USOLCharacterEquipComponent plain ptr (owner-only content
+                                                      in practice)
+    +0xE68   CapsuleHalfHeight (base)
+    +0xE64   CapsuleRadius
+
+UGPAttributeSetHealth (via HealthComponent + 0x280):
+    +0x38    Health.BaseValue
+    +0x3C    Health.CurrentValue     ← used for HP display
+    +0x50    MaxHealth.BaseValue
+    +0x54    MaxHealth.CurrentValue
+    +0x70    ArmorHealth (local only)
+    +0x98    HelmetArmorHealth (local only)
+
+USkeletalMeshComponent:
+    +0xA28   CachedComponentSpaceTransforms (SDK)
+    +0xEB8/0xEC8/0xED8/0xEE8  live slots (probed)
+    +0x1A8..0x1E8  4x TArrays for FReferenceSkeleton
+    +0x1D0   FVector ComponentToWorld.Translation (approx, canonical
+             UE 4.24 slot inside USceneComponent Pad_1A2..0x250)
+
+AGPPlayerState:
+    +0x660   TeamID
+    +0x94C   CurrentCharacterLiveStatus
+    +0x3F8   PawnPrivate (encrypted)
+
+UGameInstance chain (for local pawn):
+    uworld + 0x190  GameInstance
+    gi     + 0x38   LocalPlayers TArray
+    lp     + 0x30   PlayerController
+    pc     + 0x408  PlayerCameraManager
+    pcm    + 0x31DB0 POV (FEncryptedVector + rotation + fov)
+
+FNamePool (bones, misc):
+    XOR mask 0x0E on the raw FName Index byte.
+    Blocks[] at pool + 0x08.
+
+--------------------------------------------------------------------
+7. WHAT IS NEVER USED
+--------------------------------------------------------------------
+  - DMA. Feedback rule: DeltaHack is external + kdu shellcode BYOVD
+    (provider #26 inpoutx64). No PCILeech / MemProcFS / FPGA.
+  - Injection. Even for research, only through the launcher
+    manual-map path if we ever need to; the daemon never touches
+    game process memory as target of a WPM/AllocEx.
+  - Any test-signed driver on the 2PC. HVCI blocks that class.
+
+Compatible ONLY with Windows 11 24H2 / 25H2, HVCI ON, Hyper-V ON,
+Secure Boot ON, Intel + AMD, budget = 0.
+
+--------------------------------------------------------------------
+8. LATEST STATUS
+--------------------------------------------------------------------
+Fresh Dumper-7 SDK dumped 2026-09-21 evening at
+    C:\Dumper-7\4.24.2-0+++UE4+Release-4.24-DeltaForce\CppSDK\SDK\
+
+Armor investigation status: see docs/ARMOR_STATUS.txt.
+Skeleton implementation: see docs/SKELETON_NOTES.txt.

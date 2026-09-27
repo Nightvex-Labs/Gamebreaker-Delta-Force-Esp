@@ -1,0 +1,46 @@
+# Build artifacts
+loader/build/
+launcher/build/
+launcher/embed/
+build/
+*.obj
+*.pdb
+*.exp
+*.lib
+*.exe
+*.dll
+*.vmp.exe
+*.kfpl
+
+# Backups
+*.bak
+*.bak_*
+*.raw_backup_*
+*_backup_*
+*_prev_*
+
+# Logs
+*.log
+logs/
+
+# Temp
+*.tmp
+scratch/
+scratchpad/
+
+# IDA / RE artifacts (not for team)
+*.idb
+*.i64
+*.til
+*.nam
+*.id0
+*.id1
+*.id2
+
+# VMProtect project files (contain keys)
+*.vmp
+
+# Local editor
+.vscode/
+.idea/
+*.swp

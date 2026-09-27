@@ -1,0 +1,7 @@
+// dh_launcher.rc — embeds encrypted dh_loader.kfpl as RCDATA.
+// Regenerate the .kfpl before each build with:
+//   python ../scripts/pack_kfpl.py ../loader/build/dh_loader.exe embed/dh_loader.kfpl --key-hex <KEY>
+
+#define IDR_KFPL_PAYLOAD 101
+
+IDR_KFPL_PAYLOAD RCDATA "embed\\dh_loader.kfpl"

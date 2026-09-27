@@ -1,0 +1,444 @@
+DeltaHack Armor ESP — investigation status
+==============================================
+Author: Byte
+Date:   2026-09-21
+Target: Delta Force (UE 4.24.2, ACE + SGuard64), build 1.102.37117.80
+
+TL;DR
+-----
+Armor tier + HP work reliably for the LOCAL pawn only. On remote
+pawns the same chain returns empty data because the containing
+component's array content is server-side stripped (COND_OwnerOnly
+replication).
+
+To ship enemy-visible armor ESP we need a different data source —
+either the `Get3PArmorLevel_BS` chain (reverse required) or a
+separate replicated field that mirrors the tier for 3P visuals.
+
+--------------------------------------------------------------------
+1. WHAT WORKS TODAY
+--------------------------------------------------------------------
+Local pawn (own Klinochek), verified in-raid multiple times:
+
+  pawn + 0x3960                              (encrypted)
+      & DF_ENC_PTR_MASK  ->  UCharacterEquipComponent*
+
+  comp + 0x1E8   TArray<FArmorInfo> EquipedArmorInfoArray
+                 { u64 Data, i32 Num, i32 Max }
+                 (Net + RepNotify on the source, but OwnerOnly in
+                 practice — see section 3.)
+
+  FArmorInfo stride 0x88, live layout confirmed via hex dump:
+     +0x00 uint8   EquipmentType     (1=Helmet, 5=BreastPlate)
+     +0x08 uint64  ItemID
+     +0x10 uint64  Gid
+     +0x18 float   ArmorHP           (current combat HP — shown as
+                                      "durability" in overlay)
+     +0x1C float   MaxArmorHP
+     +0x20 float   Durability (long-term wear, unused)
+     +0x24 float   MaxDurability
+     +0x28 float   SrcMaxDurability
+     +0x80 int32   ArmorLevel        (tier 1..N)
+
+Verified reads while wearing armour t=4 helm=t=4 (100 / 35):
+    entry0  kind=1 hp=35.0 tier=4   ← helmet
+    entry1  kind=5 hp=100.0 tier=4  ← chest plate
+
+Path also works when reached via `pawn + 0x24E0` cached ptr
+(ADFMCharacter.CharacterEquipComponentCache), same target
+(mask -> identical component address).
+
+--------------------------------------------------------------------
+2. WHAT DOES NOT WORK
+--------------------------------------------------------------------
+Every remote pawn we probed produced:
+    comp valid at 0x3960 / 0x24E0
+    arr @ +0x1E8 => arrData=0, arrNum=0    (empty)
+    tmap @ +0x408 (EquipmentLvInfoFor3P) => all zeros
+    HealthSet.ArmorHealth / HelmetArmorHealth (0x70 / 0x98) = 0
+
+Diagnostic ARSCAN pass over 8 candidate offsets on every remote
+pawn (players + bots) — ALL returned the same shape: shell of the
+component is replicated but its content is not.
+
+Concretely: server does NOT stream FArmorInfo entries, does NOT
+stream Health/ArmorHealth attributes and does NOT stream the 3P
+TMap to non-owner clients.
+
+--------------------------------------------------------------------
+3. WHY: OWNER-ONLY REPLICATION
+--------------------------------------------------------------------
+Every candidate we found for tier/HP is on a subobject that the
+UE net driver treats as OwnerOnly:
+
+  UGPAttributeSetHealth
+    Net + RepNotify on ArmorHealth / HelmetArmorHealth, but
+    AttributeSet objects apply COND_OwnerOnly by default — Health
+    itself is only correct on the local player and shows the local
+    player's real value, whereas remote-observed characters get 0.
+
+  UCharacterEquipComponent
+    EquipedArmorInfoArray, EquipmentInfoArray and EquipmentLvInfoFor3P
+    are declared Net + RepNotify, but Delta's ClientNotify RPC
+    populates them only on the owning client's own comp. Reading
+    the comp on a remote pawn always yields an empty TArray and
+    zero-filled TMap.
+
+Result: no simple "tier field" is exposed on the remote pawn.
+
+--------------------------------------------------------------------
+4. ATTEMPTS AND OUTCOMES
+--------------------------------------------------------------------
+A) Multi-offset probe (0x3960, 0x24E0, 0x1A30, 0x0390, 0x3968,
+   0x4130, 0x4140, 0x0D88).
+   - 0x3960 / 0x24E0 always resolve to same comp for players.
+   - 0x0390 (USOL comp direct ptr) is PLAIN (unencrypted) — matches
+     Arena Breakout's approach — but its TArray contents on remote
+     are again empty / random data.
+   - 0x4130 / 0x4140 (BP_DFMCharacter_AI InventoryManager, plain
+     ptr) — comp valid on remote, TArray has entries, but the
+     entries are not FArmorInfo (kinds are noise, tier not at +0x80).
+
+B) HealthSet dump. hs+0x70=ArmorHealth, hs+0x98=HelmetArmorHealth
+   confirmed for local pawn. Remote HealthSets read all zero for
+   those fields.
+
+C) Live snapshot diff on local pawn while swapping armor tiers
+   (t=4 -> t=2 -> off). Diff scanner across pawn+[0..0x10000] and
+   comp+[0..0x2000]. Zero consistent int32 offsets flipped in the
+   expected 4->2->0 sequence. Tier lives in a separate item UObject
+   whose address changes on every swap, so a raw memcmp on the
+   parent pawn cannot see it move.
+
+D) Parallel SDK sweep (workflow), 200+ candidate fields, converted
+   into a 36-probe list. Every high-priority probe pointed back at
+   the same OwnerOnly component; no independent net-replicated
+   "3P tier" field surfaced.
+
+E) IDA path. Get3PArmorLevel_BS / Get3PArmorLevel_ES strings live
+   at Delta_dec.exe file offsets 0x18434272, 0x184344FA, 0x185AA350
+   (VAs 0x158434272, 0x1584344FA, 0x1585AA350). IDA reported
+   "no xrefs" on all three. UE binaries typically bind execFoo
+   stubs via IMPLEMENT_FUNCTION macros that IDA does not resolve
+   as xrefs.
+
+F) Offline binary xref scan (mmap + LEA rel32 + imm64) also
+   returned zero references. Suspect the dumped Delta_dec.exe is
+   a partial memory image — some LEA targets already fall outside
+   the file (e.g. 0x19E5FB0C6 > file end 0x15F853600), consistent
+   with a dump that only covers Delta's own module, not adjacent
+   DLLs.
+
+--------------------------------------------------------------------
+5. NEXT STEPS
+--------------------------------------------------------------------
+Order by cost:
+
+  1. IDA: search `CachedArmorLevel` string (Alt+B on the ASCII
+     bytes if strings-tab xref fails). This is a field name, not a
+     method — its xref usually lands in the UProperty registration
+     table where the parent class and offset are stored explicitly
+     as data. That gives the tier's real offset in one shot.
+
+  2. IDA: dump the FClassInfo static table for
+     UCharacterEquipComponent. UE emits IMPLEMENT_FUNCTION entries
+     as { FName name, function ptr, NumParms, Parms[], ... } and
+     the entry for Get3PArmorLevel resolves the exec stub address.
+
+  3. IDA: reverse ClientNotifyEquipmentLvInfoFor3P_Implementation.
+     This is the RPC handler on the client side. It MUST write the
+     tier somewhere — that "somewhere" is our field. String has 3
+     hits in binary (file offsets 0x184335FA, 0x1843383A, 0x1859C418).
+
+  4. If IDA reveals nothing, spawn a proxy DLL that hooks
+     `UCharacterEquipComponent::ClientNotifyEquipmentLvInfoFor3P`
+     in-process on 2PC and logs the write target. Cost: 1 injection
+     but gives ground truth in one session.
+
+  5. Fallback: ship overlay without remote-armor ESP, keep the
+     row visible only for own pawn (currently suppressed from
+     rendering by is_local filter). Not a real ship path but keeps
+     the rest of the ESP stable.
+
+--------------------------------------------------------------------
+6. FILES CHANGED THIS SESSION
+--------------------------------------------------------------------
+loader/src/overlay/dh_daemon_esp.c
+    - Added read_armor_hp_from_healthset() helper. Currently reads
+      via CharacterEquipComponent chain (mis-named for historical
+      reasons — was originally an AttributeSet reader).
+    - Added multi-offset probe with per-pawn cache.
+    - Backup saved as dh_daemon_esp.c.bak_armor_hunt_20260921.
+
+loader/inc/dh_shmem.h
+    - Added helmet_tier / helmet_durability / armor_tier /
+      armor_durability fields to DH_SHMEM_PLAYER.
+
+loader/src/overlay/dh_overlay_imgui.cpp
+    - Armor row renders "H:x(y) A:x(y)" between HP and name.
+    - Two toggles per group: "Armor tier" and "Armor durability".
+    - Bots limited to 500m for the armor row.
+
+--------------------------------------------------------------------
+7. IDA HINTS FOR NEXT SESSION
+--------------------------------------------------------------------
+Delta_dec.exe image base: 0x140000000. File total size 0x1F853600.
+The binary is a memory-dumped image; sections are laid out so that
+file_offset == VA - image_base.
+
+Verified string locations (raw \0-terminated hits):
+
+  UCharacterEquipComponent::Get3PArmorLevel_BS   file 0x18434258   VA 0x158434258
+  UCharacterEquipComponent::Get3PArmorLevel_ES   file 0x184344E0   VA 0x1584344E0
+  CachedArmorLevel                               file 0x183AD300   VA 0x1583AD300
+  EquipmentLvInfoFor3P                           file 0x184331D8   VA 0x1583431D8
+  ClientNotifyEquipmentLvInfoFor3P               file 0x184335FA   VA 0x1583435FA
+  HelmetLv                                       file 0x179DA598   VA 0x1579DA598
+  BreastPlateLv                                  file 0x179DA588   VA 0x1579DA588
+  ArmorLevelForArmor                             file 0x18251DC0   VA 0x158251DC0
+  ArmorLevelForHelmet                            file 0x18252008   VA 0x158252008
+  equip_level_helmet                             file 0x16DEEA58   VA 0x156DEEA58
+  equip_level_armor                              file 0x16DEEA70   VA 0x156DEEA70
+
+Investigation notes from the offline binary sweep (Python mmap):
+  - Neither LEA rel32 nor imm64 references to any of the above VAs
+    show up in the dump. Almost certainly because the strings are
+    dereferenced via the UE FName pool and the code stores an FName
+    index, not the string pointer.
+  - IDA also reported "no xrefs" for Get3PArmorLevel_BS in the
+    live IDB. Same reason.
+  - Some LEA rel32 targets in the dump land beyond file end
+    (0x19E5xxxxx > 0x15F853600). That's consistent with Delta_dec
+    being a partial memory image — imported DLLs live outside the
+    dumped range, so Python-only xref analysis is limited.
+
+Next-session recipes to try in IDA:
+
+  1. `Alt+B` (byte pattern search) on the ASCII bytes of
+     CachedArmorLevel — sometimes hex-search picks up FName pool
+     hashes that string-tab xref misses.
+  2. Search for `IMPLEMENT_FUNCTION(UCharacterEquipComponent,`
+     followed by `execGet3PArmorLevel`. UE's macro puts a raw
+     function-name FName index into a static registration table
+     right before the exec stub. Once found, the stub reveals the
+     tier field offset.
+  3. Reverse ClientNotifyEquipmentLvInfoFor3P_Implementation. This
+     is the RPC that server calls on every client; the write target
+     inside it IS our field on the local pawn.
+  4. If IDA gives nothing, ship a proxy DLL that hooks the RPC
+     handler in-process on 2PC and logs the write target — one
+     session gives ground truth.
+
+Docs to update once we find the offset:
+  - This file (ARMOR_STATUS.txt) — mark section 3 as unblocked.
+  - loader/src/overlay/dh_daemon_esp.c — swap
+    read_armor_via_equipcomp for the direct 3P chain, keep old
+    code as fallback for local pawn.
+  - loader/inc/dh_shmem.h — no changes expected; helmet_tier,
+    armor_tier, *_durability already there.
+
+Baseline production state at end of session 2026-09-21:
+  loader/src/overlay/dh_daemon_esp.c backed up to
+    loader/src/overlay/dh_daemon_esp.c.bak_armor_hunt_20260921
+  before all the diag scanners (DIFF/EQSCAN/ARSCAN/ARDIAG/HSDUMP/
+  ECPROBE/EQAC/EQHS/EQFI/EQPS/TIER) were stripped. Backup can be
+  consulted if any of the discovery paths are useful again.
+
+--------------------------------------------------------------------
+9. IDA STRING SIG-SCAN RESULTS (Delta_dec.exe, 2026-09-21 late)
+--------------------------------------------------------------------
+Scanned raw bytes of Delta_dec.exe for cleartext method names. All
+file offsets are RVAs in Delta_dec.exe; virtual address = ImageBase
+0x140000000 + file offset for straight-mapped sections.
+
+Get3PArmorLevel   @ file 0x18434272  ( va ~0x158434272 )
+Get3PArmorLevel   @ file 0x184344FA  ( va ~0x1584344FA )
+Get3PArmorLevel   @ file 0x185AA350  ( va ~0x1585AA350 )
+GetArmorLevel     @ file 0x162FE868
+GetArmorLevel     @ file 0x1679A168
+GetArmorLevel     @ file 0x182953F9
+
+Two of the Get3PArmorLevel hits match the earlier IDA VAs for
+Get3PArmorLevel_BS and _ES (0x158434258/0x1584344E0 — the strings
+are the names right after the function bodies, so hits land a few
+bytes into the same block). Third hit 0x185AA350 is a new spot
+— probably ClientNotifyEquipmentLvInfoFor3P or a call site.
+
+GetArmorLevel (no _BS/_ES) has three hits. 0x18295... is worth a
+look — it is a function separate from the 3P variants and might
+be the local-only variant that reads FArmorInfo.ArmorLevel from
+the equipped item directly (the one that works for us on local
+pawn). If so, cross-referencing its callers tells us where the
+tier field lives on the item UObject — same field the server
+replicates on remotes via the inventory entry we captured.
+
+--------------------------------------------------------------------
+10. INVENTORY DUMP FINDINGS (2026-09-21 late)
+     [SUPERSEDED — the "TArray" was a misread; see section 11]
+--------------------------------------------------------------------
+Ran INVDUMP scan across 6 candidate offsets on live pawns. Only
+pawn+0x1EB0 consistently produced non-empty TArrays. Contents on
+one pawn (probably local): 13 entries. Contents on a nearby pawn:
+1 entry. Layout is NOT FArmorInfo (kinds are noise, tier not at
++0x80). But every entry has:
+
+  +0x00  uint64  UObject vtable ptr (repeated 0x4317ACA9F across
+                                     multiple entries -> same
+                                     UInventoryItem-like class)
+  +0x08  uint64  looks like ItemID (values e.g. 0x0112CFAF,
+                                     0x0BEBC202, 0x647DF900000005)
+  +0x10  uint64  Gid / instance uid
+  +0x60..+0x80  child pointers (0x843B1A B5 00, 0x843C8B70,...)
+                that dereference to nested UObject data
+
+Entries appear to be inline UObject-container records the server
+DOES replicate to observers. If we can identify the field where
+each item stores tier (probably on the object pointed to by one
+of those child pointers, not on the inline record itself),
+enemy armor ESP becomes possible without an in-process hook.
+
+Raw hex captured on 2026-09-21 21:30:28 (LOCAL user pawn eb4b0010,
+13 entries, stride 0xA0):
+
+  ALL entries share a magic constant at +0x9C: 0x4165D832
+    (bytes 32 D8 65 41 in every entry). This is either a class
+    tag, a struct-type discriminator, or a Delta memory-allocator
+    marker. Same-value-across-13-entries pins struct size to 0xA0.
+
+  Entries with same vt at +0x00 = same UClass:
+    e0, e2 vt=0x4317ACA9F   (probably UDFItemInstance-derived — 2 items of same class)
+    e6    vt=0x848B3C6FC0  (different class, e.g. weapon slot)
+    e1, e3, e4, e5 vt=0     (empty / zeroed / soft-ref slots)
+    e7    vt=0xC           (garbage — likely sparse-array hole)
+
+  For entry with real vt (e0), interpretation:
+    +0x00 uint64  vtable ptr  (Delta encoded ptr, top byte 0x04 present)
+    +0x08 uint64  0x0112CFAF  (ItemID literal — too small for a ptr)
+    +0x10 uint64  0x00003ABA  (subid/slot uid, small int)
+    +0x18-0x37 zeros
+    +0x38 uint64  01 00 00 00 (int32=1 low + 0 high — count/flag)
+    +0x3C int32   0x0BCC9408 top bits — points into replicated data
+    +0x40 int32   1
+    +0x44-0x57 zeros
+    +0x58 int32   0xFFFFFFFF (or -1 as index)
+    +0x68 uint64  0x84831AB500  (heap ptr to nested item state)
+    +0x70 int32   8, int32 8   (two counts, e.g. slot capacity)
+    +0x78 uint64  1
+    +0x80-0x9B zeros
+    +0x9C uint32  0x4165D832 (magic)
+
+The two entries at same vt (e0, e2) are the most useful — since
+Delta likely wraps every equipped item in the same instance
+class, pulling that class name via GNames on the vt would tell
+us whether this is FEquippedItem, UInventorySlot, or the item
+UObject itself. Then we can grep the SDK dump for the class
+name to get its property list.
+
+Concrete next investigation (unchanged):
+  - Take one entry's +0x00 vtable ptr, follow it, resolve UClass
+    name via GNames (we already have that primitive in daemon).
+    That names the item class (UInventoryItem / UArmorItem / ...).
+  - Grep the fresh SDK for that class and read out its property
+    layout. Tier and HP are almost certainly plain int32/float
+    fields on the item UObject.
+  - Once known, iterate 0x1EB0 arr on remote pawns and filter
+    entries by item type prefix (helmet/plate) exactly like
+    ABIFinal's decode_armor_tier() does.
+
+Backup of the INVDUMP-emitting build lives at
+    loader/src/overlay/dh_daemon_esp.c.bak_armor_hunt_20260921
+which also contains the ARSCAN/ARDIAG variants if you want to
+resurrect the multi-candidate probe.
+
+--------------------------------------------------------------------
+11. CORRECTION — INVDUMP was reading BubbleComponent2, not inventory
+--------------------------------------------------------------------
+The `pawn+0x1EB0` "13-entry TArray" from section 10 was a misread.
+Grepping the fresh Dumper-7 SDK reveals `pawn+0x1EB0` is actually
+`FEncryptedObjectProperty_ BubbleComponent2` — an 8-byte encrypted
+pointer to a defensive-bubble/shield UObject, NOT a TArray at all.
+
+  GPGameplay_classes.hpp:20458:
+    FEncryptedObjectProperty_ BubbleComponent2;   // 0x1EB0(0x0008)
+
+What INVDUMP actually did:
+  - Read pawn+0x1EB0 -> "arrData"    = the decrypted BubbleComponent2 ptr
+  - Read pawn+0x1EB8 -> "num"        = low 32 bits of SharedEffectComponent
+                                       (another encrypted ptr; low bits
+                                       looked like 1 or 13 due to
+                                       Delta's ptr layout)
+  - Iterated `num` "entries" of 0xA0 bytes into the BubbleComponent2
+    UObject's own memory
+
+The 0x4165D832 magic at every entry +0x9C is a byte pattern from
+the bubble component's internal state, not a class discriminator.
+The vtable-looking values (0x4317ACA9F etc.) are internal UObject
+fields inside the bubble, not inventory item vt pointers.
+
+--------------------------------------------------------------------
+12. REAL FIX — replicated TMap<EEquipmentType, int32>
+--------------------------------------------------------------------
+The SDK grep for anything that looks like "3P armor level info"
+turned up the actual replicated field, on UCharacterEquipComponent
+(the same component we read for local FArmorInfo):
+
+  DFMGameplay_classes.hpp:11611:
+    TMap<EEquipmentType, int32> EquipmentLvInfoFor3P;  // 0x0408(0x0050)
+
+This TMap is:
+  - Written on the server via NotifyEquipmentLvInfoFor3P / the
+    ClientNotifyEquipmentLvInfoFor3P RPC we saw in section 6.
+  - Not COND_OwnerOnly — it's replicated to all clients, exactly
+    the field Delta uses to draw the 3rd-person helmet+plate icons
+    over enemies in-world.
+
+EEquipmentType (GPGameplay_structs.hpp:2292):
+    None=0, Helmet=1, Headset=2, FaceMask=3, Armband=4,
+    BreastPlate=5, Glasses=6, ChestHanging=7, Bag=8, SafeBox=9,
+    Tool=10, Shoes=11, KeyChain=12, Max=13.
+
+TMap layout in UE 4.24 (via UnrealContainers.hpp):
+    TMap -> TSet<TPair<K,V>>
+    TSet -> { TSparseArray<SetElement<TPair<K,V>>>, HashPtr, HashSize }
+    TSparseArray -> { TArray Data, FBitArray AllocFlags,
+                      int32 FirstFreeIdx, int32 NumFreeIndices }
+    SetElement<TPair<uint8,int32>> = 16 bytes:
+        +0x00 uint8  Key (EEquipmentType)
+        +0x01-0x03  padding
+        +0x04 int32  Value (tier)
+        +0x08 int32  HashNextId
+        +0x0C int32  HashIndex
+
+To read the map without decoding the bitmap:
+  1. mapData = read u64  @ comp+0x0408
+  2. mapNum  = read i32  @ comp+0x0410
+  3. for i in [0..mapNum]:
+       read 16 bytes @ mapData + i*16
+       accept if bytes[1..3] == 0 (padding is zero on used slots
+       but usually non-zero on free slots holding PrevFreeIndex)
+       and tier in [1..8]
+       key 1 -> helmet, key 5 -> breastplate
+
+The one-shot diag `TIER-TMap pawn=%llx H=%u A=%u` is wired in
+`read_armor_via_equipcomp` right after the local FArmorInfo path —
+it prints on the FIRST successful TMap read per pawn. Watch for
+that line in `err.log` at raid start to confirm the field is
+populated for remotes.
+
+If TIER-TMap NEVER prints when enemies are in view, the possible
+failures are (ranked by likelihood):
+  (a) mapNum is zero for observers — server strips this TMap too,
+      same COND_OwnerOnly-style filter as EquipedArmorInfoArray.
+      Not proven yet; the ArmorHealth AttributeSet was replicated
+      so precedent goes the other way.
+  (b) mapData points somewhere but the SetElement stride/layout
+      differs — Delta may have modified TSet internals. Check by
+      reading 64 bytes at mapData and dumping.
+  (c) The offset shifted between the SDK dump and the live build;
+      re-run Dumper-7 to confirm 0x0408 is still current.
+
+Fallback if (a): fall back to reversing `Get3PArmorLevel_BS` in
+IDA at VA 0x158434258 — that function almost certainly reads
+this same TMap. If Delta stripped the TMap on observers, the
+function has an alternative path — that alternative path IS the
+answer for us.
