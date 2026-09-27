@@ -1319,6 +1319,24 @@ static void poll_and_publish(HANDLE hDev, u64 procCR3, u64 base)
         if (!gotPos) continue;
         (void)root;
 
+        // Distance sanity vs local player — decrypt garbage passes the
+        // absolute-bounds filter (fits in +/-200000) but lands 10-100+ km
+        // away from us, producing the "boxes miss" bug when uc_ready=0 and
+        // the VTBL Feistel fallback returns a plausible-but-wrong point.
+        // Delta maps top out ~4-5 km wide → anything > 6000 m from local
+        // player position is decrypt-broken garbage, skip.
+        //
+        // Skip check for local + when we don't yet have our own position
+        // (first frames until haveMy is set).
+        if (!isLocal && g_shmem->myX != 0.0f && g_shmem->myY != 0.0f) {
+            float _dxm = px - g_shmem->myX;
+            float _dym = py - g_shmem->myY;
+            float _dzm = pz - g_shmem->myZ;
+            float _dist2 = _dxm*_dxm + _dym*_dym + _dzm*_dzm;
+            // 6000m in Delta units (1 unit = 1 cm) = 600000 cm; squared = 3.6e11
+            if (_dist2 > 3.6e11f) continue;
+        }
+
         // SKELETON REMOVED 2026-09-26 — was one-shot mesh/refBoneInfo dump
         // + g_bone_parents init. No longer needed since bones are cut.
 
@@ -3180,10 +3198,12 @@ int DaemonEspRun(HANDLE hDev, u64 procCR3, u64 base)
                 if (p->x != 0.0f || p->y != 0.0f) n_ready_pos++;
             }
             dh_diag_line("stats: tick=%u hz=%.1f count=%u valid=%d alive=%d bot=%d local=%d "
-                         "with_pos=%d uc_ready=%d xorps_ready=%d",
+                         "with_pos=%d uc_ready=%d xorps_ready=%d vtbl_ready=%d "
+                         "myX=%.0f myY=%.0f myZ=%.0f",
                          tick, g_shmem->main_hz, (unsigned)g_shmem->count,
                          n_valid, n_alive, n_bot, n_local, n_ready_pos,
-                         g_uc_ready, g_xorps_ready);
+                         g_uc_ready, g_xorps_ready, g_vtbl_ready,
+                         g_shmem->myX, g_shmem->myY, g_shmem->myZ);
         }
         if (stop_ev && WaitForSingleObject(stop_ev, 0) == WAIT_OBJECT_0) {
             DH_INFO("daemon-esp stop signal received");
