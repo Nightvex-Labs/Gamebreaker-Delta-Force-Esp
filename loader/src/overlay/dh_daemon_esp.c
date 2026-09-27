@@ -3342,6 +3342,14 @@ int DaemonEspRun(HANDLE hDev, u64 procCR3, u64 base)
             if (target - elapsed > 0.002) Sleep(1);
         }
     }
+    // Signal overlay to shut down — we're exiting (Delta gone / stop event
+    // fired / fatal loop error). Overlay's message pump polls this event
+    // every frame and breaks on signal; without it overlay hangs alive with
+    // a stale/empty shmem after daemon dies. Named event is shared with
+    // overlay's own CreateEventW open — SetEvent flips it visible to both.
+    if (stop_ev) SetEvent(stop_ev);
+    dh_diag_line("daemon: DaemonEspRun EXIT — signaled overlay stop_ev");
+
     // Stop cam thread first — it uses g_shmem/g_hDev.
     InterlockedExchange(&g_cam_stop, 1);
     if (g_cam_thread) {

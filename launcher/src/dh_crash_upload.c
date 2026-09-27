@@ -417,23 +417,35 @@ void dh_crash_upload_after_child(DWORD child_pid, DWORD exit_code, const char* v
     mp_field(&body, &body_len, &body_cap, boundary, "child_pid", NULL,
              (const uint8_t*)meta, strlen(meta));
 
+    // NOTE: field names use "ah_" prefix — the koenflow.com telemetry server
+    // is shared with arenahack and its parseMultipart hardcodes ah_launcher /
+    // ah_reader / ah_procs / ah_crashmeta / ah_dump as the accepted keys.
+    // We keep the DH filenames inside the multipart for clarity when server
+    // dumps them to disk (server names files after field key, but the client
+    // can hint the actual product via the "product" text field).
     if (launcher_buf && launcher_len)
-        mp_field(&body, &body_len, &body_cap, boundary, "dh_launcher",
+        mp_field(&body, &body_len, &body_cap, boundary, "ah_launcher",
                  "dh_launcher.log", launcher_buf, launcher_len);
     if (reader_buf && reader_len)
-        mp_field(&body, &body_len, &body_cap, boundary, "dh_reader",
+        mp_field(&body, &body_len, &body_cap, boundary, "ah_reader",
                  "dh_reader.log", reader_buf, reader_len);
     if (procs_buf && procs_len)
-        mp_field(&body, &body_len, &body_cap, boundary, "dh_procs",
+        mp_field(&body, &body_len, &body_cap, boundary, "ah_procs",
                  "dh_procs.log", procs_buf, procs_len);
-    if (core_buf && core_len)
-        mp_field(&body, &body_len, &body_cap, boundary, "core_log",
-                 "core.log", core_buf, core_len);
-    if (crashmeta_buf && crashmeta_len)
-        mp_field(&body, &body_len, &body_cap, boundary, "crash_meta",
+    // Server accepts only one "ah_crashmeta" — prefer crash_meta.txt (SEH
+    // context) over core.log when both present, because dh_reader already
+    // carries most of what core.log has (both are per-tick diag streams).
+    // If no crash_meta this run, fall back to core.log tail so we still
+    // ship the payload's WARN/ERROR history.
+    if (crashmeta_buf && crashmeta_len) {
+        mp_field(&body, &body_len, &body_cap, boundary, "ah_crashmeta",
                  "crash_meta.txt", crashmeta_buf, crashmeta_len);
+    } else if (core_buf && core_len) {
+        mp_field(&body, &body_len, &body_cap, boundary, "ah_crashmeta",
+                 "core.log", core_buf, core_len);
+    }
     if (dump_buf && dump_len)
-        mp_field(&body, &body_len, &body_cap, boundary, "crash_dump",
+        mp_field(&body, &body_len, &body_cap, boundary, "ah_dump",
                  "crash_dump.dmp", dump_buf, dump_len);
 
     // Final boundary.
