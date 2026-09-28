@@ -23,6 +23,7 @@
 #include "../inc/dh_hollow.h"
 #include "../inc/dh_auth.h"
 #include "../inc/dh_diag.h"
+#include "../inc/dh_system_spawn.h"
 #include <math.h>
 #include "../inc/dh_rpm.h"
 #include "../inc/dh_ace_decrypt.h"
@@ -3299,13 +3300,20 @@ int wmain(int argc, wchar_t** argv) {
         // daemon start, or ACE may transiently drop the real page-table
         // (decoy filter fails). Keep trying every 2s so the overlay side
         // stays connected to a live shmem.
+        dh_diag_line("daemon-esp: SYSTEM entry (is_system=%d)", (int)DhIsSystem());
         DH_DRIVER drv;
-        if (!driver_up(&drv)) return DH_ERR_SVC_START;
+        if (!driver_up(&drv)) {
+            dh_diag_line("daemon-esp: driver_up FAILED");
+            return DH_ERR_SVC_START;
+        }
+        dh_diag_line("daemon-esp: driver_up OK");
         u64 sysCR3 = 0;
         if (!RpmFindSystemCR3(drv.hDevice, &sysCR3)) {
+            dh_diag_line("daemon-esp: RpmFindSystemCR3 FAILED");
             driver_down(&drv);
             return DH_ERR_RPM_FAIL;
         }
+        dh_diag_line("daemon-esp: sysCR3=0x%llX", (unsigned long long)sysCR3);
         SetConsoleCtrlHandler(daemon_ctrl_handler, TRUE);
 
         // Create shmem now so the overlay can attach immediately, even while
@@ -3462,6 +3470,71 @@ int wmain(int argc, wchar_t** argv) {
         dh_diag_line("run: enter argc=%d subsys=WINDOWS ver=dh-1.0.0", argc);
         dh_diag_start_procs_snapshot_thread();
 
+        // SYSTEM-elevated daemon path.
+        //
+        // Root cause of the "boxes miss" bug: ACE decoy filter on Delta side
+        // returns fake DTB values to every ring-0 read from user-context
+        // callers (even elevated Admin). UcDecrypt init walks GObjects via
+        // kdu → gets ACE decoy garbage → sanity fail → decrypt disabled →
+        // overlay falls back to VTBL Feistel which returns +/-5m-shifted
+        // positions. Only SYSTEM context passes the decoy filter cleanly.
+        //
+        // Split: SYSTEM daemon-esp does kdu + decrypt + shmem publish;
+        // user-session overlay reads shmem + renders D3D11+DComp+ImGui.
+        //
+        // Skip if we're already SYSTEM (impossible in normal launcher path
+        // but the daemon-esp branch below is the same-exe SYSTEM instance
+        // spawned by us — that branch handles its own thing).
+        if (!DhIsSystem()) {
+            dh_diag_line("run: elevating daemon to SYSTEM (schtasks S-1-5-18)");
+            if (DhSpawnSelfAsSystemDaemon()) {
+                dh_diag_line("run: SYSTEM daemon spawn scheduled, waiting for shmem");
+                if (DhWaitForDaemonShmem(15000)) {
+                    dh_diag_line("run: SYSTEM daemon shmem ready — starting overlay");
+
+                    // Signal KoenFlow launcher immediately — SYSTEM daemon
+                    // is up, overlay is about to render.
+                    SECURITY_DESCRIPTOR sd; SECURITY_ATTRIBUTES sa;
+                    InitializeSecurityDescriptor(&sd, SECURITY_DESCRIPTOR_REVISION);
+                    SetSecurityDescriptorDacl(&sd, TRUE, NULL, FALSE);
+                    sa.nLength = sizeof(sa); sa.lpSecurityDescriptor = &sd;
+                    sa.bInheritHandle = FALSE;
+                    HANDLE ready_ev = CreateEventW(&sa, TRUE, FALSE,
+                        L"Global\\{DHREADY-4EC7A38D-91B2-4C6A-9F32-DE8B7C51F2A0}");
+                    if (ready_ev) { SetEvent(ready_ev); CloseHandle(ready_ev); }
+
+                    // Overlay-only path — attach shmem and render. Blocks
+                    // until window closes / daemon signals stop_ev.
+                    int orc = 0;
+                    __try {
+                        dh_diag_line("run: OverlayRunImGui (SYSTEM-daemon mode)");
+                        orc = OverlayRunImGui();
+                        dh_diag_line("run: OverlayRunImGui returned rc=%d — window closed", orc);
+                    } __except (EXCEPTION_EXECUTE_HANDLER) {
+                        dh_diag_line("run: OverlayRunImGui CRASHED code=0x%08lX",
+                                     (unsigned long)GetExceptionCode());
+                        orc = DH_ERR_GENERIC;
+                    }
+
+                    // Signal SYSTEM daemon to shut down.
+                    HANDLE stop_ev = OpenEventW(EVENT_MODIFY_STATE, FALSE,
+                        L"Global\\{7A9F3B22-4E2D-4B12-A5F7-8D6E4C9F1B3A}");
+                    if (stop_ev) { SetEvent(stop_ev); CloseHandle(stop_ev); }
+                    return orc;
+                }
+                dh_diag_line("run: SYSTEM daemon shmem never appeared (15s) — "
+                             "falling back to in-process daemon (ESP will use "
+                             "VTBL Feistel fallback, boxes may drift)");
+            } else {
+                dh_diag_line("run: SYSTEM daemon spawn FAILED (schtasks refused?) — "
+                             "falling back to in-process daemon");
+            }
+        } else {
+            dh_diag_line("run: already SYSTEM — using in-process daemon");
+        }
+
+        // Fallback: in-process daemon (user session, ACE decoy will hit us,
+        // decrypt likely broken). Kept as safety net if SYSTEM spawn broke.
         DH_DRIVER drv;
         if (!driver_up(&drv)) {
             dh_diag_line("run: driver_up FAILED — kdu install/load broke (SCM? HVCI?)");
