@@ -1243,7 +1243,7 @@ static void render_frame_inner()
     // Home = toggle settings panel (opens ImGui window + captures input)
     if ((GetAsyncKeyState(VK_HOME) & 1)) {
         STAGE("home:pressed");
-        DH_WARN("[hotkey] Home pressed, panel_open %d -> %d",
+        DH_INFO("[hotkey] Home pressed, panel_open %d -> %d",
                 (int)g_ui.panel_open, (int)!g_ui.panel_open);
         g_ui.panel_open = !g_ui.panel_open;
         set_input_capture(g_ui.panel_open);
