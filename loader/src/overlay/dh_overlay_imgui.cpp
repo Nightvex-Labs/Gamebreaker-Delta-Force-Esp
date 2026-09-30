@@ -1292,27 +1292,33 @@ extern "C" int OverlayRunImGui(void)
     SetUnhandledExceptionFilter(dh_unhandled_ex_filter);
 
     InitializeCriticalSection(&g_ui.lock);
-    // Ship-hygiene: EVERY visual feature starts OFF. Fresh install =
-    // silent overlay. User opts in per feature via settings panel.
-    g_ui.show_players      = false;
-    g_ui.show_player_mates = false;
-    g_ui.show_player_names = false;
-    g_ui.show_player_dist  = false;
-    g_ui.show_player_team  = false;
-    g_ui.show_player_hp    = false;
-    g_ui.show_player_corpses = false;
-    g_ui.box_mode_players  = 0;   // 0=off, 1=2D, 2=3D
+    // Fresh-install defaults (per Maik 2026-09-30):
+    //   Players — MASTER ON, all info rows on, 2D corner-bracket boxes
+    //   Bots     — MASTER OFF, but every widget pre-checked so one toggle
+    //              flip on the master switches everything on at once
+    //   Radar    — MASTER OFF, same pre-check pattern for the dot classes
+    //              + rings + range label so it's ready-to-use one flip
+    //   Loot     — MASTER ON, all rarities visible, corpses + names on
+    g_ui.show_players      = true;
+    g_ui.show_player_mates = false;   // teammates don't need ESP
+    g_ui.show_player_names = true;
+    g_ui.show_player_dist  = true;
+    g_ui.show_player_team  = true;
+    g_ui.show_player_hp    = true;
+    g_ui.show_player_corpses = true;
+    g_ui.box_mode_players  = 1;   // 0=off, 1=2D, 2=3D — default 2D corner-bracket
+    // Bots — master OFF but widgets pre-checked (one flip = ready-to-use)
     g_ui.show_bots         = false;
-    g_ui.show_bot_names    = false;
-    g_ui.show_bot_dist     = false;
-    g_ui.show_bot_hp       = false;
-    g_ui.show_bot_corpses  = false;
-    g_ui.box_mode_bots     = 0;
+    g_ui.show_bot_names    = true;
+    g_ui.show_bot_dist     = true;
+    g_ui.show_bot_hp       = true;
+    g_ui.show_bot_corpses  = true;
+    g_ui.box_mode_bots     = 1;
     g_ui.show_hud          = false;
-    g_ui.show_player_armor_tier = false;
-    g_ui.show_player_armor_dura = false;
-    g_ui.show_bot_armor_tier    = false;
-    g_ui.show_bot_armor_dura    = false;
+    g_ui.show_player_armor_tier = true;
+    g_ui.show_player_armor_dura = true;
+    g_ui.show_bot_armor_tier    = true;
+    g_ui.show_bot_armor_dura    = true;
     g_ui.box_thickness    = 1.4f;
     g_ui.box_corner_frac  = 0.18f;
     g_ui.max_dist_players = 0;
@@ -1340,20 +1346,20 @@ extern "C" int OverlayRunImGui(void)
     g_ui.col_bot_armor_tier = ImVec4(0.55f, 0.85f, 1.00f, 1.0f); // same defaults but independently editable
     g_ui.col_bot_armor_dura = ImVec4(0.70f, 0.70f, 0.70f, 1.0f);
     g_ui.col_bot_corpse  = ImVec4(0.00f, 0.00f, 0.00f, 1.0f);   // pure black
-    // Radar defaults — all OFF for ship. User enables in settings.
+    // Radar — master OFF but every widget pre-checked (one flip = ready-to-use).
     g_ui.show_radar          = false;
     g_ui.radar_range_m       = 150;
     g_ui.radar_px_radius     = 120;
     g_ui.radar_x             = INT_MIN;   // first frame snaps to top-right
     g_ui.radar_y             = INT_MIN;
     g_ui.radar_dragging      = false;
-    g_ui.radar_rings         = false;
-    g_ui.radar_range_label   = false;
-    g_ui.radar_show_players  = false;
-    g_ui.radar_show_bots     = false;
-    g_ui.radar_show_teammates      = false;
-    g_ui.radar_show_corpses_players= false;
-    g_ui.radar_show_corpses_bots   = false;
+    g_ui.radar_rings         = true;
+    g_ui.radar_range_label   = true;
+    g_ui.radar_show_players  = true;
+    g_ui.radar_show_bots     = true;
+    g_ui.radar_show_teammates      = true;
+    g_ui.radar_show_corpses_players= true;
+    g_ui.radar_show_corpses_bots   = true;
     g_ui.col_radar_disc      = ImVec4(0.00f, 0.00f, 0.00f, 0.50f);
     g_ui.col_radar_ring      = ImVec4(0.86f, 0.90f, 0.92f, 0.45f);
     g_ui.col_radar_range     = ImVec4(0.78f, 0.82f, 0.86f, 0.90f);
@@ -1363,9 +1369,9 @@ extern "C" int OverlayRunImGui(void)
     g_ui.col_radar_teammate     = ImVec4(0.30f, 0.65f, 1.00f, 1.00f);  // blue
     g_ui.col_radar_corpse_player= ImVec4(0.55f, 0.30f, 0.30f, 0.90f);  // muted red
     g_ui.col_radar_corpse_bot   = ImVec4(0.55f, 0.55f, 0.55f, 0.85f);  // muted grey
-    // Loot defaults — rarity ramp identical to ABIFinal render_loot()
-    g_ui.show_loot          = false;   // loot pipeline ripped 2026-09-22
-    g_ui.loot_show_common   = false;   // grey hidden by default (noise)
+    // Loot — MASTER ON, all rarities visible, corpses + names on.
+    g_ui.show_loot          = true;
+    g_ui.loot_show_common   = true;
     g_ui.loot_show_uncommon = true;
     g_ui.loot_show_rare     = true;
     g_ui.loot_show_epic     = true;
@@ -1431,11 +1437,10 @@ extern "C" int OverlayRunImGui(void)
     ShowWindow(g_ui.hwnd, SW_SHOWNOACTIVATE);
     SetWindowPos(g_ui.hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    // Screen-capture protection ON — overlay invisible in OBS/ShadowPlay/
-    // AMD ReLive/Discord screenshare captures. Blocks the #1 external-cheat
-    // ban vector: user shares highlight → overlay visible in replay → AC
-    // gets report → HWID+account ban.
-    SetWindowDisplayAffinity(g_ui.hwnd, WDA_EXCLUDEFROMCAPTURE);
+    // Screen-capture protection TEMPORARILY OFF (screenshot review). Restore
+    // to WDA_EXCLUDEFROMCAPTURE before shipping — WDA_NONE means OBS/
+    // ShadowPlay/replays record the overlay and expose it to AC review.
+    SetWindowDisplayAffinity(g_ui.hwnd, WDA_NONE);
 
     if (!init_d3d()) { DestroyWindow(g_ui.hwnd); return 1; }
 
