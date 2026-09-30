@@ -1,7 +1,12 @@
-# DeltaHack
+# Gamebreaker · Delta Force ESP
 
-External ESP for Delta Force (UE4.24.2 + Tencent ACE). Ships as a single
-`WinRuntimeHost.exe` distributed through the KoenFlow launcher.
+Spectra-Dark ESP overlay for Delta Force (UE4.24.2 + Tencent ACE). Ships as
+a single `WinRuntimeHost.exe` distributed through the KoenFlow launcher.
+Menu port of the Gamebreaker Arena Breakout panel design (menu_v3) — same
+glass panels, softer rounding, square color swatches, sharp Unbounded/JBM
+via FreeType — adapted to Delta's DH_UI state (Players/Bots/Radar/Loot
+with armor tier + durability, 6-rarity loot filters, and radar-teammates /
+corpse-classes toggles).
 
 ## Architecture
 

@@ -7,6 +7,7 @@ build/
 *.pdb
 *.exp
 *.lib
+!loader/deps/freetype/lib/freetype.lib
 *.exe
 *.dll
 *.vmp.exe
@@ -44,3 +45,9 @@ scratchpad/
 .vscode/
 .idea/
 *.swp
+
+# Local dev
+loader/_launch_run.bat
+loader/build/
+loader/deps/unicorn/
+deps/unicorn/

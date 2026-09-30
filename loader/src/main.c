@@ -816,6 +816,13 @@ int wmain(int argc, wchar_t** argv) {
         return DH_OK;
     }
 
+    // UI-only dispatch — overlay-imgui doesn't need admin/driver, so bypass
+    // the elevated gate. Panel renders, world ESP is idle (shmem is empty).
+    if (!wcscmp(argv[1], L"overlay-imgui")) {
+        extern int OverlayRunImGui(void);
+        return OverlayRunImGui();
+    }
+
     if (!is_elevated())
         DH_FATAL("must run elevated");
 

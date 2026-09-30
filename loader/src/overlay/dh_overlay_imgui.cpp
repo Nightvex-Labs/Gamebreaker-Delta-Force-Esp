@@ -23,6 +23,10 @@
 #include "../../deps/imgui/imgui.h"
 #include "../../deps/imgui/backends/imgui_impl_win32.h"
 #include "../../deps/imgui/backends/imgui_impl_dx11.h"
+#include "../../deps/imgui/misc/freetype/imgui_freetype.h"
+#include "../dh_ui/menu_v3.hpp"
+#include "../dh_ui/icons.hpp"
+#include <vector>
 
 // Embed stb_image just here (STB_IMAGE_IMPLEMENTATION only in this TU)
 #pragma warning(push)
@@ -34,10 +38,8 @@
 #pragma warning(pop)
 #include "../../deps/stb/nightvex_logo_png.h"
 
-extern "C" {
-#include "../../inc/dh_common.h"
-#include "../../inc/dh_shmem.h"
-}
+// dh_ui_state.hpp already extern-"C"-wraps dh_common.h + dh_shmem.h internally.
+#include "../../inc/dh_ui_state.hpp"
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -55,146 +57,8 @@ ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 // -----------------------------------------------------------------------------
 // State
 // -----------------------------------------------------------------------------
-
-struct DH_UI {
-    HWND hwnd;
-    int  sw, sh;
-
-    // D3D11 chain via DComp
-    ID3D11Device*           d3d;
-    ID3D11DeviceContext*    ctx;
-    IDXGISwapChain1*        swap;
-    ID3D11RenderTargetView* rtv;
-    IDCompositionDevice*    dcomp;
-    IDCompositionTarget*    dcompT;
-    IDCompositionVisual*    dcompV;
-
-    // Shmem
-    HANDLE   hMap;
-    DH_SHMEM* shmem;
-
-    // Local frame data (double-buffered from shmem)
-    CRITICAL_SECTION lock;
-    DH_SHMEM_PLAYER  players[DH_MAX_PLAYERS];
-    DH_SHMEM_LOOT    loot[DH_MAX_LOOT];
-    int              loot_count;
-    int   count;
-    float camX, camY, camZ, camYaw, camPitch, camRoll, fov;
-    int   myTeam;
-
-    // Toggles — split per entity type so Players/Bots don't share
-    bool  show_players;
-    bool  show_player_mates;    // draw same-team players (default off)
-    bool  show_player_names;
-    bool  show_player_dist;
-    bool  show_player_team;     // print numeric team id under distance
-    bool  show_player_hp;       // HP line above the nickname
-    bool  show_player_corpses;  // draw dead players
-    int   box_mode_players;     // 0=Off, 1=2D corner-bracket, 2=3D wireframe
-    bool  show_bots;
-    bool  show_bot_names;
-    bool  show_bot_dist;
-    bool  show_bot_hp;          // HP line above the nickname for bots
-    bool  show_bot_corpses;
-    int   box_mode_bots;        // 0=Off, 1=2D corner-bracket, 2=3D wireframe
-    bool  show_hud;
-    // Radar (cyan-glow military, ABIFinal port)
-    bool  show_radar;
-    int   radar_range_m;         // 50..500m visible range
-    int   radar_px_radius;       // 60..200 px disc radius
-    int   radar_x, radar_y;      // center pixel coords; INT_MIN = uninitialised
-    bool  radar_dragging;        // drag state while panel open
-    float radar_drag_dx, radar_drag_dy;  // mouse-to-center offset at drag start
-    bool  radar_rings;           // dashed concentric range rings
-    bool  radar_range_label;     // "250" above outer ring
-    bool  radar_show_players;    // enemy human players
-    bool  radar_show_bots;
-    bool  radar_show_teammates;
-    bool  radar_show_corpses_players;   // dead enemy humans
-    bool  radar_show_corpses_bots;      // dead AI
-    // Loot (English-only labels, per user spec)
-    bool  show_loot;
-    bool  loot_show_common;      // rarity 0 (grey)
-    bool  loot_show_uncommon;    // 1 (green)
-    bool  loot_show_rare;        // 2 (blue)
-    bool  loot_show_epic;        // 3 (purple)
-    bool  loot_show_legendary;   // 4 (gold)
-    bool  loot_show_mythic;      // 5 (red)
-    bool  loot_show_corpses;     // dropped-loot pile from dead pawn
-    bool  loot_show_names;       // draw item name text under dot
-    int   loot_max_dist_m;       // 0 = unlimited
-    int   loot_min_value;        // hide anything cheaper than this ($)
-    bool  show_player_armor_tier;   // H:<tier> / A:<tier>
-    bool  show_player_armor_dura;   // (durability) numbers
-    bool  show_bot_armor_tier;
-    bool  show_bot_armor_dura;
-
-    // Settings (adjustable via panel)
-    float box_thickness;
-    float ui_scale;              // monitor_h / 1080 (1.0 @1080p, 1.33 @1440p, 2.0 @4K)
-    float box_corner_frac;   // 0.10 - 0.30 fraction of height
-    int   max_dist_players;  // 0 = unlimited, 1..1000 m
-    int   max_dist_bots;     // 0 = unlimited, 1..1000 m
-    int   box_dist_players;  // 0 = unlimited, box-only distance
-    int   box_dist_bots;
-    int   corpse_dist_players;
-    int   corpse_dist_bots;
-    int   text_size;         // px (approx via font scale)
-
-    // Colors (RGBA, per-entity type — not shared between players/bots)
-    ImVec4 col_player_box;
-    ImVec4 col_player_name;
-    ImVec4 col_player_dist;
-    ImVec4 col_player_team;
-    ImVec4 col_player_hp;
-    ImVec4 col_player_armor_tier;   // H:X A:Y tier text
-    ImVec4 col_player_armor_dura;   // (nn) durability numbers
-    ImVec4 col_teammate_box;   // used only for same-team players — default blue
-    ImVec4 col_player_corpse;  // dead player box override
-    ImVec4 col_bot_box;
-    ImVec4 col_bot_name;
-    ImVec4 col_bot_dist;
-    ImVec4 col_bot_hp;
-    ImVec4 col_bot_armor_tier;      // bot tier text
-    ImVec4 col_bot_armor_dura;      // bot durability numbers
-    ImVec4 col_bot_corpse;     // dead bot box override
-    // Radar palette
-    ImVec4 col_radar_disc;      // filled disc background
-    ImVec4 col_radar_ring;      // dashed rings + edge
-    ImVec4 col_radar_range;     // "250" range label
-    ImVec4 col_radar_self;      // center dot (you)
-    ImVec4 col_radar_player;    // enemy human dot
-    ImVec4 col_radar_bot;
-    ImVec4 col_radar_teammate;
-    ImVec4 col_radar_corpse_player;
-    ImVec4 col_radar_corpse_bot;
-    // Loot palette — rarity colors (matches ABIFinal / most looter shooters)
-    ImVec4 col_loot_common;      // grey
-    ImVec4 col_loot_uncommon;    // green
-    ImVec4 col_loot_rare;        // blue
-    ImVec4 col_loot_epic;        // purple
-    ImVec4 col_loot_legendary;   // gold
-    ImVec4 col_loot_mythic;      // red
-    ImVec4 col_loot_corpse;      // corpse-drop marker (black box)
-
-    // Panel state
-    bool  panel_open;
-    bool  input_capture;
-    int   lang;   // 0=EN, 1=RU, 2=CN
-
-    // Fonts
-    ImFont* font_big;
-    ImFont* font_mid;
-
-    // Textures
-    ID3D11ShaderResourceView* logo_srv;
-
-    // Threads
-    volatile LONG running;
-    HANDLE   poll_th;
-};
-
-static DH_UI g_ui = {};
+// struct DH_UI lives in inc/dh_ui_state.hpp (shared with dh_ui/menu_v3.cpp).
+DH_UI g_ui = {};
 
 // Two-column layout override for tab bodies. When g_col_w > 0 the row
 // helpers use it as their child-width and g_col_x as the X offset from
@@ -1379,7 +1243,7 @@ static void render_frame_inner()
     // Home = toggle settings panel (opens ImGui window + captures input)
     if ((GetAsyncKeyState(VK_HOME) & 1)) {
         STAGE("home:pressed");
-        DH_INFO("[hotkey] Home pressed, panel_open %d -> %d",
+        DH_WARN("[hotkey] Home pressed, panel_open %d -> %d",
                 (int)g_ui.panel_open, (int)!g_ui.panel_open);
         g_ui.panel_open = !g_ui.panel_open;
         set_input_capture(g_ui.panel_open);
@@ -1388,656 +1252,11 @@ static void render_frame_inner()
     // Insert hotkey removed per user 2026-09-22 — Home only.
 
     // ---- Settings panel (ABI Nightvex layout: sidebar + row-cards) --------
+    // ---- Settings panel — Spectra v3 Dark (menu_v3 port) --------------
     if (g_ui.panel_open) {
-        STAGE_LOG("panel:begin");
-        // Nightvex palette
-        const ImU32 C_WINDOW  = IM_COL32(0x0A,0x0A,0x0C,255);
-        const ImU32 C_SIDEBAR = IM_COL32(0x0A,0x0A,0x0C,255);
-        const ImU32 C_ROW     = IM_COL32(0x10,0x10,0x14,255);
-        const ImU32 C_ROWHV   = IM_COL32(0x14,0x14,0x18,255);
-        const ImU32 C_SEGACT  = IM_COL32(0x1A,0x1A,0x1F,255);
-        const ImU32 C_LINE    = IM_COL32(255,255,255,20);
-        const ImU32 C_TEXT    = IM_COL32(0xF4,0xF4,0xF6,255);
-        const ImU32 C_MUTED   = IM_COL32(0x8B,0x8B,0x95,255);
-        const ImU32 C_AMBER   = IM_COL32(0xE6,0xA3,0x5A,255);
-
-        ImGui::PushStyleColor(ImGuiCol_WindowBg,      C_WINDOW);
-        ImGui::PushStyleColor(ImGuiCol_ChildBg,       C_WINDOW);
-        ImGui::PushStyleColor(ImGuiCol_TitleBg,       C_WINDOW);
-        ImGui::PushStyleColor(ImGuiCol_TitleBgActive, C_WINDOW);
-        ImGui::PushStyleColor(ImGuiCol_Border,        C_LINE);
-        // Slider/input track: distinct mid-grey so the track reads against
-        // the row background (row is C_ROW ≈ 0x101014, near-black).
-        ImGui::PushStyleColor(ImGuiCol_FrameBg,       IM_COL32(0x38,0x38,0x42,255));
-        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered,IM_COL32(0x44,0x44,0x50,255));
-        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, IM_COL32(0x50,0x50,0x5C,255));
-        ImGui::PushStyleColor(ImGuiCol_CheckMark,     C_AMBER);
-        // High-contrast slider knob: white against dark track. Active state
-        // brightens to amber so the drag is visible.
-        ImGui::PushStyleColor(ImGuiCol_SliderGrab,       IM_COL32(0xFF,0xFF,0xFF,255));
-        ImGui::PushStyleColor(ImGuiCol_SliderGrabActive, C_AMBER);
-        ImGui::PushStyleColor(ImGuiCol_Text,          C_TEXT);
-        ImGui::PushStyleColor(ImGuiCol_TextDisabled,  C_MUTED);
-        ImGui::PushStyleColor(ImGuiCol_Header,        C_ROW);
-        ImGui::PushStyleColor(ImGuiCol_HeaderHovered, C_ROWHV);
-        ImGui::PushStyleColor(ImGuiCol_HeaderActive,  C_SEGACT);
-        ImGui::PushStyleColor(ImGuiCol_ScrollbarBg,   IM_COL32(0,0,0,0));
-        ImGui::PushStyleColor(ImGuiCol_ScrollbarGrab, IM_COL32(60,60,68,180));
-        ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabHovered, IM_COL32(80,80,90,220));
-        ImGui::PushStyleColor(ImGuiCol_ScrollbarGrabActive,  C_AMBER);
-
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 10.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding,  8.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,  6.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_GrabRounding,   4.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize,    14.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,  ImVec2(0, 0));
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,    ImVec2(0, 8));
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
-
-        const float kWinW = 900.0f * g_ui.ui_scale;
-        const float kWinH = 620.0f * g_ui.ui_scale;
-        ImGui::SetNextWindowSize(ImVec2(kWinW, kWinH), ImGuiCond_Always);
-        ImGui::SetNextWindowPos(ImVec2(sw * 0.5f, sh * 0.5f),
-                                ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-
-        STAGE_LOG("panel:styles-pushed");
-        if (ImGui::Begin("##dh_panel", &g_ui.panel_open,
-                         ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings
-                         | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize))
-        {
-            STAGE("panel:body");
-            static int s_tab = 0;   // 0=Visuals 1=Radar 2=Overlay 3=Settings
-            const float kSidebarW = 200.0f * g_ui.ui_scale;
-
-            // â”€â”€ SIDEBAR â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, C_SIDEBAR);
-            ImGui::BeginChild("##sidebar", ImVec2(kSidebarW, kWinH),
-                              false, ImGuiWindowFlags_NoScrollbar);
-
-            ImGui::Dummy(ImVec2(0, 18));
-            // Logo tile â€” placeholder amber square + product name
-            ImVec2 p = ImGui::GetCursorScreenPos();
-            ImDrawList* wdl = ImGui::GetWindowDrawList();
-            // Nightvex logo — real amber shield PNG rasterized from the
-            // Nightvex brand SVG, drawn via ImGui::Image over the sidebar
-            // draw list. No tile behind it (logo has transparent bg).
-            {
-                float x = p.x + 14, y = p.y;
-                float sz = 44;
-                if (g_ui.logo_srv) {
-                    wdl->AddImage((ImTextureID)g_ui.logo_srv,
-                                  ImVec2(x, y),
-                                  ImVec2(x + sz, y + sz));
-                } else {
-                    // Fallback: solid amber square if texture missing
-                    wdl->AddRectFilled(ImVec2(x, y),
-                                       ImVec2(x + sz, y + sz),
-                                       C_AMBER, 8.0f);
-                }
-            }
-            // "Nightvex" text next to the logo, vertically centered
-            ImFont* fb = g_ui.font_big;
-            const char* nvtxt = "Nightvex";
-            if (fb) {
-                wdl->AddText(fb, 22.0f,
-                             ImVec2(p.x + 64, p.y + 9),
-                             C_TEXT, nvtxt);
-            } else {
-                wdl->AddText(ImVec2(p.x + 64, p.y + 11), C_TEXT, nvtxt);
-            }
-            ImGui::Dummy(ImVec2(0, 56));
-
-            // Tabs — custom-drawn rows with icon + label
-            struct Tab { const char* label; const char* icon; };
-            const Tab tabs[] = {
-                {tr("tab.players"), "player"},
-                {tr("tab.bots"),    "bot"},
-                {tr("tab.radar"),   "radar"},
-#ifdef DH_DEBUG
-                {"Loot",            "loot"},      // debug only
-                {tr("tab.overlay"), "overlay"},   // debug only
-#endif
-                {tr("tab.lang"),    "settings"},
-            };
-            for (int i = 0; i < IM_ARRAYSIZE(tabs); i++) {
-                bool sel = (s_tab == i);
-                ImGui::SetCursorPosX(12);
-                ImVec2 pos = ImGui::GetCursorScreenPos();
-                float w = kSidebarW - 24, h = 40;
-                ImDrawList* tdl = ImGui::GetWindowDrawList();
-                bool hov = ImGui::IsMouseHoveringRect(pos, ImVec2(pos.x+w, pos.y+h));
-                ImU32 bg = sel ? C_SEGACT : (hov ? C_ROWHV : IM_COL32(0,0,0,0));
-                tdl->AddRectFilled(pos, ImVec2(pos.x+w, pos.y+h), bg, 8.0f);
-                // Active-tab amber bar on left edge
-                if (sel) {
-                    tdl->AddRectFilled(pos,
-                                      ImVec2(pos.x + 3, pos.y + h),
-                                      C_AMBER, 2.0f);
-                }
-                // Icon (24x24 area centered vertically, left)
-                ImU32 ic = sel ? C_AMBER : C_TEXT;
-                float ix = pos.x + 14, iy = pos.y + h * 0.5f;
-                if (!strcmp(tabs[i].icon, "player")) {
-                    // Person: circle head + trapezoid body
-                    tdl->AddCircle(ImVec2(ix + 8, iy - 3), 3.5f, ic, 16, 1.7f);
-                    ImVec2 body[4] = {
-                        { ix + 2.5f,  iy + 7 },
-                        { ix + 13.5f, iy + 7 },
-                        { ix + 12,    iy + 2 },
-                        { ix + 4,     iy + 2 },
-                    };
-                    tdl->AddPolyline(body, 4, ic, ImDrawFlags_Closed, 1.7f);
-                }
-                else if (!strcmp(tabs[i].icon, "bot")) {
-                    // Bot: antenna + rounded rect head + eyes
-                    tdl->AddLine(ImVec2(ix + 8, iy - 8), ImVec2(ix + 8, iy - 5), ic, 1.5f);
-                    tdl->AddCircleFilled(ImVec2(ix + 8, iy - 8), 1.4f, ic, 10);
-                    tdl->AddRect(ImVec2(ix + 2, iy - 5), ImVec2(ix + 14, iy + 6),
-                                 ic, 3.0f, 0, 1.7f);
-                    tdl->AddCircleFilled(ImVec2(ix + 5.5f, iy), 1.3f, ic, 10);
-                    tdl->AddCircleFilled(ImVec2(ix + 10.5f, iy), 1.3f, ic, 10);
-                }
-                else if (!strcmp(tabs[i].icon, "radar")) {
-                    tdl->AddCircle(ImVec2(ix + 8, iy), 9.0f, ic, 24, 1.7f);
-                    tdl->AddCircle(ImVec2(ix + 8, iy), 4.5f, ic, 20, 1.7f);
-                    tdl->AddLine(ImVec2(ix + 8, iy), ImVec2(ix + 14, iy - 6), ic, 1.7f);
-                    tdl->AddCircleFilled(ImVec2(ix + 8, iy), 1.5f, ic, 8);
-                }
-                else if (!strcmp(tabs[i].icon, "overlay")) {
-                    // Rounded window with title bar
-                    tdl->AddRect(ImVec2(ix, iy - 8), ImVec2(ix + 18, iy + 8),
-                                ic, 2.5f, 0, 1.7f);
-                    tdl->AddLine(ImVec2(ix + 1, iy - 3), ImVec2(ix + 17, iy - 3),
-                                ic, 1.4f);
-                    tdl->AddLine(ImVec2(ix + 4, iy + 2), ImVec2(ix + 10, iy + 2),
-                                ic, 1.4f);
-                }
-                else if (!strcmp(tabs[i].icon, "settings")) {
-                    // Gear: outer 6-tooth star + inner circle
-                    tdl->AddCircle(ImVec2(ix + 8, iy), 3.0f, ic, 16, 1.7f);
-                    for (int t = 0; t < 6; t++) {
-                        float a = t * 3.14159f / 3.0f;
-                        float x1 = ix + 8 + cosf(a) * 5.0f;
-                        float y1 = iy     + sinf(a) * 5.0f;
-                        float x2 = ix + 8 + cosf(a) * 8.5f;
-                        float y2 = iy     + sinf(a) * 8.5f;
-                        tdl->AddLine(ImVec2(x1, y1), ImVec2(x2, y2), ic, 2.0f);
-                    }
-                }
-                // Label
-                if (g_ui.font_mid) {
-                    tdl->AddText(g_ui.font_mid, 17.0f,
-                                ImVec2(pos.x + 44, pos.y + 11),
-                                sel ? C_AMBER : C_TEXT, tabs[i].label);
-                } else {
-                    tdl->AddText(ImVec2(pos.x + 44, pos.y + 12),
-                                sel ? C_AMBER : C_TEXT, tabs[i].label);
-                }
-                // Consume the space + handle click
-                char id[16]; snprintf(id, sizeof(id), "##tab%d", i);
-                if (ImGui::InvisibleButton(id, ImVec2(w, h))) {
-                    s_tab = i;
-                }
-                ImGui::Dummy(ImVec2(0, 4));
-            }
-
-            ImGui::EndChild();
-            ImGui::PopStyleColor();
-
-            // â”€â”€ MAIN CONTENT â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-            ImGui::SameLine(0, 0);
-            ImGui::BeginChild("##content", ImVec2(kWinW - kSidebarW, kWinH),
-                              false);
-
-            // Breadcrumb — just the tab label (tight to top of content)
-            ImGui::PushStyleColor(ImGuiCol_Text, C_TEXT);
-            ImGui::SetCursorPosX(g_col_x);
-            ImGui::Text("%s", tabs[s_tab].label);
-            ImGui::PopStyleColor();
-
-            // ABI-style pill toggle switch — amber when on, dark when off,
-            // white knob slides across. Returns true if state changed.
-            auto pill_toggle = [](const char* id, bool* v) {
-                float w = 40, h = 22;
-                ImVec2 pos = ImGui::GetCursorScreenPos();
-                ImGui::InvisibleButton(id, ImVec2(w, h));
-                bool clicked = ImGui::IsItemClicked();
-                if (clicked) *v = !*v;
-                ImDrawList* dl = ImGui::GetWindowDrawList();
-                ImU32 track_on  = IM_COL32(0xE6,0xA3,0x5A, 255);   // amber
-                ImU32 track_off = IM_COL32(0x2A,0x2A,0x30, 255);   // dark grey
-                ImU32 knob      = IM_COL32(0xF4,0xF4,0xF6, 255);
-                ImU32 knob_off  = IM_COL32(0xB8,0xB8,0xBE, 255);
-                float r = h * 0.5f;
-                dl->AddRectFilled(pos, ImVec2(pos.x + w, pos.y + h),
-                                  *v ? track_on : track_off, r);
-                float kx = *v ? (pos.x + w - r) : (pos.x + r);
-                dl->AddCircleFilled(ImVec2(kx, pos.y + r), r - 3.0f,
-                                     *v ? knob : knob_off, 24);
-                return clicked;
-            };
-
-            // Round color-picker chip — replaces the default ColorEdit4 square.
-            // Click opens a full ColorPicker4 popup at the chip's position.
-            auto color_circle = [&](const char* id, ImVec4* color) {
-                const float r = 10.0f;
-                ImVec2 pos = ImGui::GetCursorScreenPos();
-                ImGui::InvisibleButton(id, ImVec2(r * 2.0f, r * 2.0f));
-                if (ImGui::IsItemClicked()) ImGui::OpenPopup(id);
-                ImDrawList* dl = ImGui::GetWindowDrawList();
-                ImU32 fill = ImGui::ColorConvertFloat4ToU32(*color);
-                ImU32 border = IM_COL32(255, 255, 255, 80);
-                ImVec2 c = ImVec2(pos.x + r, pos.y + r);
-                dl->AddCircleFilled(c, r, fill, 32);
-                dl->AddCircle(c, r, border, 32, 1.2f);
-                if (ImGui::BeginPopup(id)) {
-                    ImGui::ColorPicker4("##pk", (float*)color,
-                        ImGuiColorEditFlags_NoLabel |
-                        ImGuiColorEditFlags_AlphaBar);
-                    ImGui::EndPopup();
-                }
-            };
-
-            // Row helper — draws card: [name/desc][color chip][pill toggle]
-            // color_ptr may be NULL to omit the color chip.
-            // Compact row: single-line title, no description. Height ~40.
-            auto row = [&](const char* name, const char* /*desc*/, bool* toggle, ImVec4* color_ptr) {
-                const float row_h = 42.0f;
-                const float row_w = g_col_w > 0 ? g_col_w : (kWinW - kSidebarW - 48);
-                ImGui::SetCursorPosX(g_col_x);
-                ImGui::PushStyleColor(ImGuiCol_ChildBg, C_ROW);
-                ImGui::BeginChild(name, ImVec2(row_w, row_h), true,
-                                  ImGuiWindowFlags_NoScrollbar);
-
-                float title_h = ImGui::GetFontSize();
-                float ty = (row_h - title_h) * 0.5f;
-
-                ImGui::SetCursorPos(ImVec2(18, ty));
-                ImGui::PushStyleColor(ImGuiCol_Text, C_TEXT);
-                ImGui::Text("%s", name);
-                ImGui::PopStyleColor();
-
-                if (color_ptr) {
-                    ImGui::SetCursorPos(ImVec2(row_w - 92, (row_h - 20) * 0.5f));
-                    char cid[64];
-                    snprintf(cid, sizeof(cid), "##col_%s", name);
-                    color_circle(cid, color_ptr);
-                }
-                char pid[64];
-                snprintf(pid, sizeof(pid), "##pt_%s", name);
-                ImGui::SetCursorPos(ImVec2(row_w - 62, (row_h - 22) * 0.5f));
-                pill_toggle(pid, toggle);
-
-                ImGui::EndChild();
-                ImGui::PopStyleColor();
-            };
-
-            // Box-mode row — title on left, [Off] [2D] [3D] radio triplet on
-            // right, color picker. Replaces the two separate 2D/3D toggles.
-            // Box control — two-row block:
-            //   Row 1: "Box"  — pill-toggle on/off + color picker
-            //   Row 2 (only if on): "Style" — [2D] [3D] radio pair
-            // mode: 0=Off, 1=2D, 2=3D. Turning off nukes mode→0 but remembers
-            // the last non-zero style so re-enabling restores 2D/3D user picked.
-            auto box_mode_row = [&](const char* name, int* mode, ImVec4* color_ptr) {
-                const float row_h = 42.0f;
-                const float row_w = g_col_w > 0 ? g_col_w : (kWinW - kSidebarW - 48);
-
-                // Row 1 — main On/Off toggle with color picker.
-                ImGui::SetCursorPosX(g_col_x);
-                ImGui::PushStyleColor(ImGuiCol_ChildBg, C_ROW);
-                char cid_row1[96]; snprintf(cid_row1, sizeof(cid_row1), "%s##bm_r1", name);
-                ImGui::BeginChild(cid_row1, ImVec2(row_w, row_h), true,
-                                  ImGuiWindowFlags_NoScrollbar);
-                float title_h = ImGui::GetFontSize();
-                float ty = (row_h - title_h) * 0.5f;
-                ImGui::SetCursorPos(ImVec2(18, ty));
-                ImGui::PushStyleColor(ImGuiCol_Text, C_TEXT);
-                ImGui::Text("%s", name);
-                ImGui::PopStyleColor();
-
-                if (color_ptr) {
-                    ImGui::SetCursorPos(ImVec2(row_w - 92, (row_h - 20) * 0.5f));
-                    char cid[64];
-                    snprintf(cid, sizeof(cid), "##colbm_%s", name);
-                    color_circle(cid, color_ptr);
-                }
-                // Static per-row memory of last non-zero style, so toggling
-                // Off → On restores the previously picked 2D/3D. Key by mode*
-                // pointer identity so Players and Bots rows keep independent
-                // memories.
-                static int* last_ptr[8]  = {0};
-                static int  last_val[8]  = {1,1,1,1,1,1,1,1};
-                int slot = 0;
-                for (; slot < 8; slot++) {
-                    if (last_ptr[slot] == mode) break;
-                    if (last_ptr[slot] == 0)  { last_ptr[slot] = mode; break; }
-                }
-                if (*mode != 0 && slot < 8) last_val[slot] = *mode;
-
-                bool on = (*mode != 0);
-                char pid[64];
-                snprintf(pid, sizeof(pid), "##pt_bm_%s", name);
-                ImGui::SetCursorPos(ImVec2(row_w - 62, (row_h - 22) * 0.5f));
-                pill_toggle(pid, &on);
-                if (on && *mode == 0) *mode = (slot < 8 ? last_val[slot] : 1);
-                if (!on) *mode = 0;
-
-                ImGui::EndChild();
-                ImGui::PopStyleColor();
-
-                // Row 2 — Style picker, only when on.
-                if (*mode != 0) {
-                    ImGui::SetCursorPosX(g_col_x);
-                    ImGui::PushStyleColor(ImGuiCol_ChildBg, C_ROW);
-                    char cid_row2[96]; snprintf(cid_row2, sizeof(cid_row2), "%s##bm_r2", name);
-                    ImGui::BeginChild(cid_row2, ImVec2(row_w, row_h), true,
-                                      ImGuiWindowFlags_NoScrollbar);
-                    ImGui::SetCursorPos(ImVec2(18, ty));
-                    ImGui::PushStyleColor(ImGuiCol_Text, C_TEXT);
-                    ImGui::Text("%s", tr("row.box.style"));
-                    ImGui::PopStyleColor();
-
-                    const char* labels[2] = { tr("box.2d"), tr("box.3d") };
-                    // Right-align the [2D][3D] radio pair. Measure total width,
-                    // then start at (row_w - total - right_margin).
-                    float gap = 20.0f, right_margin = 16.0f;
-                    float knob_w = ImGui::GetFontSize() + 4.0f;   // radio circle
-                    float t0 = ImGui::CalcTextSize(labels[0]).x;
-                    float t1 = ImGui::CalcTextSize(labels[1]).x;
-                    float total = (knob_w + t0) + gap + (knob_w + t1);
-                    float rx = row_w - total - right_margin;
-                    float ry = (row_h - 20) * 0.5f;
-                    for (int i = 0; i < 2; i++) {
-                        ImGui::SetCursorPos(ImVec2(rx, ry));
-                        char rid[64]; snprintf(rid, sizeof(rid), "%s##bm_%s_%d",
-                                               labels[i], name, i);
-                        // radio value = i+1 (1=2D, 2=3D)
-                        if (ImGui::RadioButton(rid, *mode == (i + 1))) {
-                            *mode = i + 1;
-                            if (slot < 8) last_val[slot] = *mode;
-                        }
-                        rx += knob_w + (i == 0 ? t0 : t1) + gap;
-                    }
-
-                    ImGui::EndChild();
-                    ImGui::PopStyleColor();
-                }
-            };
-
-            // Round color-picker chip — replaces the default ColorEdit4 square.
-            // Click opens a full ColorPicker4 popup at the chip's position.
-            // Section header — amber label with a thin divider line below.
-            // Not clickable, not collapsible; purely visual grouping inside a tab.
-            auto section_header = [&](const char* label) {
-                const float default_w = kWinW - kSidebarW - 48;
-                const float row_w = g_col_w > 0 ? g_col_w : default_w;
-                ImGui::Dummy(ImVec2(0, 4));
-                ImGui::SetCursorPosX(g_col_x);
-                ImGui::PushStyleColor(ImGuiCol_Text, C_AMBER);
-                ImGui::Text("%s", label);
-                ImGui::PopStyleColor();
-                ImDrawList* dl2 = ImGui::GetWindowDrawList();
-                ImVec2 p = ImGui::GetCursorScreenPos();
-                dl2->AddLine(ImVec2(p.x + g_col_x, p.y + 2),
-                             ImVec2(p.x + g_col_x + row_w, p.y + 2),
-                             IM_COL32(255, 255, 255, 30), 1.0f);
-                ImGui::Dummy(ImVec2(0, 6));
-            };
-
-            // Compact slider row — title on left, slider on right, no description.
-            auto slider_row = [&](const char* name, float* val, float lo, float hi,
-                                  const char* fmt)
-            {
-                const float row_h = 42.0f;
-                const float row_w = g_col_w > 0 ? g_col_w : (kWinW - kSidebarW - 48);
-                ImGui::SetCursorPosX(g_col_x);
-                ImGui::PushStyleColor(ImGuiCol_ChildBg, C_ROW);
-                ImGui::BeginChild(name, ImVec2(row_w, row_h), true,
-                                  ImGuiWindowFlags_NoScrollbar);
-                float title_h = ImGui::GetFontSize();
-                float ty = (row_h - title_h) * 0.5f;
-                ImGui::SetCursorPos(ImVec2(18, ty));
-                ImGui::PushStyleColor(ImGuiCol_Text, C_TEXT);
-                ImGui::Text("%s", name);
-                ImGui::PopStyleColor();
-
-                ImGui::SetCursorPos(ImVec2(row_w - 120, (row_h - 20) * 0.5f));
-                ImGui::PushItemWidth(108);
-                char sid[64]; snprintf(sid, sizeof(sid), "##sr_%s", name);
-                ImGui::SliderFloat(sid, val, lo, hi, fmt);
-                ImGui::PopItemWidth();
-
-                ImGui::EndChild();
-                ImGui::PopStyleColor();
-            };
-
-            // Distance-slider helper — accepts a translation key for its
-            // label so each slider states exactly what it caps. `hi` is the
-            // upper slider bound (meters). Value 0 renders as "Unlimited".
-            auto dist_slider_max = [&](const char* id, const char* lbl_key,
-                                       int* val, int hi) {
-                const float row_h = 42.0f;
-                const float row_w = g_col_w > 0 ? g_col_w : (kWinW - kSidebarW - 48);
-                ImGui::SetCursorPosX(g_col_x);
-                ImGui::PushStyleColor(ImGuiCol_ChildBg, C_ROW);
-                ImGui::BeginChild(id, ImVec2(row_w, row_h), true,
-                                  ImGuiWindowFlags_NoScrollbar);
-                float title_h = ImGui::GetFontSize();
-                float ty = (row_h - title_h) * 0.5f;
-                ImGui::SetCursorPos(ImVec2(18, ty));
-                ImGui::PushStyleColor(ImGuiCol_Text, C_TEXT);
-                ImGui::Text("%s", tr(lbl_key));
-                ImGui::PopStyleColor();
-
-                ImGui::SetCursorPos(ImVec2(row_w - 120, (row_h - 20) * 0.5f));
-                ImGui::PushItemWidth(108);
-                char pl[24];
-                if (*val == 0) snprintf(pl, sizeof(pl), "%s", tr("slider.unlim"));
-                else           snprintf(pl, sizeof(pl), "%d m", *val);
-                ImGui::SliderInt((std::string("##ds_") + id).c_str(),
-                                 val, 0, hi, pl);
-                ImGui::PopItemWidth();
-                ImGui::EndChild();
-                ImGui::PopStyleColor();
-            };
-            auto dist_slider_label = [&](const char* id, const char* lbl_key, int* val) {
-                dist_slider_max(id, lbl_key, val, 1000);
-            };
-            // Backwards-compat wrappers used by tabs below.
-            auto dist_slider = [&](const char* id, int* val) {
-                dist_slider_label(id, "row.dist", val);
-            };
-            auto box_dist_slider = [&](const char* id, int* val) {
-                dist_slider_label(id, "slider.box.dist", val);
-            };
-            (void)dist_slider; (void)box_dist_slider;
-
-            if (s_tab == 0) {   // Players — two-column layout
-                const float tab_w   = kWinW - kSidebarW - 48;
-                const float col_gap = 16.0f;
-                const float col_w   = (tab_w - col_gap) * 0.5f;
-                float y_start = ImGui::GetCursorPosY();
-
-                // ---- LEFT column: Main info ----
-                g_col_x = 24.0f;
-                g_col_w = col_w;
-                section_header(tr("sec.main"));
-                row(tr("row.enable"),     "", &g_ui.show_players, NULL);
-                float y_end_left = ImGui::GetCursorPosY();
-                float y_end_right = y_end_left;
-                if (g_ui.show_players) {
-                    dist_slider_label("dist_p", "slider.players.render", &g_ui.max_dist_players);
-                    box_mode_row(tr("row.box"), &g_ui.box_mode_players, &g_ui.col_player_box);
-                    if (g_ui.box_mode_players != 0)
-                        dist_slider_label("bd_p",  "slider.player.box",     &g_ui.box_dist_players);
-                    row(tr("row.dist.player"), "", &g_ui.show_player_dist,   &g_ui.col_player_dist);
-                    y_end_left = ImGui::GetCursorPosY();
-
-                    // ---- RIGHT column: Extra info ----
-                    ImGui::SetCursorPosY(y_start);
-                    g_col_x = 24.0f + col_w + col_gap;
-                    g_col_w = col_w;
-                    section_header(tr("sec.extra"));
-                    row(tr("row.name"),       "", &g_ui.show_player_names,  &g_ui.col_player_name);
-                    row(tr("row.hp"),         "", &g_ui.show_player_hp,     &g_ui.col_player_hp);
-                    row(tr("row.mates"),      "", &g_ui.show_player_mates, &g_ui.col_teammate_box);
-                    row(tr("row.armor.tier"), "", &g_ui.show_player_armor_tier, &g_ui.col_player_armor_tier);
-                    row(tr("row.armor.dura"), "", &g_ui.show_player_armor_dura, &g_ui.col_player_armor_dura);
-                    row(tr("row.team"),       "", &g_ui.show_player_team,   &g_ui.col_player_team);
-                    row(tr("row.corpses"),    "", &g_ui.show_player_corpses,&g_ui.col_player_corpse);
-                    if (g_ui.show_player_corpses)
-                        dist_slider_label("cdist_p", "slider.player.corpse",  &g_ui.corpse_dist_players);
-                    y_end_right = ImGui::GetCursorPosY();
-                }
-
-                // Restore single-column defaults for other tabs.
-                g_col_x = 24.0f;
-                g_col_w = 0.0f;
-                ImGui::SetCursorPosY(y_end_left > y_end_right ? y_end_left : y_end_right);
-            }
-            else if (s_tab == 1) {   // Bots — two-column layout
-                const float tab_w   = kWinW - kSidebarW - 48;
-                const float col_gap = 16.0f;
-                const float col_w   = (tab_w - col_gap) * 0.5f;
-                float y_start = ImGui::GetCursorPosY();
-
-                // ---- LEFT column: Main info ----
-                g_col_x = 24.0f;
-                g_col_w = col_w;
-                section_header(tr("sec.main"));
-                row(tr("row.enable"),     "", &g_ui.show_bots, NULL);
-                float y_end_left = ImGui::GetCursorPosY();
-                float y_end_right = y_end_left;
-                if (g_ui.show_bots) {
-                    dist_slider_max("dist_b", "slider.bots.render",    &g_ui.max_dist_bots, 200);
-                    box_mode_row(tr("row.box"), &g_ui.box_mode_bots, &g_ui.col_bot_box);
-                    if (g_ui.box_mode_bots != 0)
-                        dist_slider_max("bd_b",  "slider.bot.box",     &g_ui.box_dist_bots, 200);
-                    row(tr("row.dist.bot"),   "", &g_ui.show_bot_dist,   &g_ui.col_bot_dist);
-                    y_end_left = ImGui::GetCursorPosY();
-
-                    // ---- RIGHT column: Extra info ----
-                    ImGui::SetCursorPosY(y_start);
-                    g_col_x = 24.0f + col_w + col_gap;
-                    g_col_w = col_w;
-                    section_header(tr("sec.extra"));
-                    row(tr("row.name"),       "", &g_ui.show_bot_names,  &g_ui.col_bot_name);
-                    row(tr("row.hp"),         "", &g_ui.show_bot_hp,     &g_ui.col_bot_hp);
-                    row(tr("row.armor.tier"), "", &g_ui.show_bot_armor_tier, &g_ui.col_bot_armor_tier);
-                    row(tr("row.armor.dura"), "", &g_ui.show_bot_armor_dura, &g_ui.col_bot_armor_dura);
-                    row(tr("row.corpses"),    "", &g_ui.show_bot_corpses,&g_ui.col_bot_corpse);
-                    if (g_ui.show_bot_corpses)
-                        dist_slider_max("cdist_b", "slider.bot.corpse", &g_ui.corpse_dist_bots, 200);
-                    y_end_right = ImGui::GetCursorPosY();
-                }
-                g_col_x = 24.0f;
-                g_col_w = 0.0f;
-                ImGui::SetCursorPosY(y_end_left > y_end_right ? y_end_left : y_end_right);
-            }
-            else if (s_tab == 2) {   // Radar
-                row(tr("rad.show"),      tr("rad.show.hint"),
-                    &g_ui.show_radar, NULL);
-                row(tr("rad.players"),   tr("rad.players.hint"),
-                    &g_ui.radar_show_players, &g_ui.col_radar_player);
-                row(tr("rad.bots"),      tr("rad.bots.hint"),
-                    &g_ui.radar_show_bots, &g_ui.col_radar_bot);
-                row(tr("rad.mates"),     tr("rad.mates.hint"),
-                    &g_ui.radar_show_teammates, &g_ui.col_radar_teammate);
-                row(tr("rad.corp.pl"),   tr("rad.corp.pl.hint"),
-                    &g_ui.radar_show_corpses_players, &g_ui.col_radar_corpse_player);
-                row(tr("rad.corp.bot"),  tr("rad.corp.bot.hint"),
-                    &g_ui.radar_show_corpses_bots, &g_ui.col_radar_corpse_bot);
-                // Range + Radius — each on its own full-width row, matching
-                // the visual style of dist_slider_label rows.
-                auto radar_int_row = [&](const char* id, const char* lbl,
-                                         int* val, int lo, int hi,
-                                         const char* unit) {
-                    const float row_h = 42.0f;
-                    const float row_w = g_col_w > 0 ? g_col_w : (kWinW - kSidebarW - 48);
-                    ImGui::SetCursorPosX(g_col_x);
-                    ImGui::PushStyleColor(ImGuiCol_ChildBg, C_ROW);
-                    ImGui::BeginChild(id, ImVec2(row_w, row_h), true,
-                                      ImGuiWindowFlags_NoScrollbar);
-                    float title_h = ImGui::GetFontSize();
-                    float ty = (row_h - title_h) * 0.5f;
-                    ImGui::SetCursorPos(ImVec2(18, ty));
-                    ImGui::PushStyleColor(ImGuiCol_Text, C_TEXT);
-                    ImGui::Text("%s", lbl);
-                    ImGui::PopStyleColor();
-                    // Full-width slider: right of label + 12px gap to right margin.
-                    float lbl_w   = ImGui::CalcTextSize(lbl).x;
-                    float start_x = 18.0f + lbl_w + 16.0f;
-                    float sw_     = row_w - start_x - 16.0f;
-                    if (sw_ < 100) sw_ = 100;
-                    ImGui::SetCursorPos(ImVec2(start_x, (row_h - 20) * 0.5f));
-                    ImGui::PushItemWidth(sw_);
-                    char pl[32]; snprintf(pl, sizeof(pl), "%d %s", *val, unit);
-                    char sid[64]; snprintf(sid, sizeof(sid), "##sr_%s", id);
-                    ImGui::SliderInt(sid, val, lo, hi, pl);
-                    ImGui::PopItemWidth();
-                    ImGui::EndChild();
-                    ImGui::PopStyleColor();
-                };
-                radar_int_row("radar_range",  tr("rad.range"),
-                              &g_ui.radar_range_m,   50, 500, "m");
-                radar_int_row("radar_radius", tr("rad.radius"),
-                              &g_ui.radar_px_radius, 60, 220, "px");
-            }
-#ifdef DH_DEBUG
-            else if (s_tab == 3) {   // Loot — debug builds only
-                row("Enable",     "Show loot dots",  &g_ui.show_loot, NULL);
-                row("Show names", "Item name text",  &g_ui.loot_show_names, NULL);
-                ImGui::SetCursorPosX(g_col_x);
-                ImGui::PushItemWidth(108);
-                char d_fmt[24];
-                if (g_ui.loot_max_dist_m == 0) snprintf(d_fmt, sizeof(d_fmt), "unlimited");
-                else                           snprintf(d_fmt, sizeof(d_fmt), "%d m", g_ui.loot_max_dist_m);
-                ImGui::SliderInt("Max range##loot_maxd",
-                                 &g_ui.loot_max_dist_m, 0, 500, d_fmt);
-                ImGui::PopItemWidth();
-                ImGui::SetCursorPosX(g_col_x);
-                ImGui::PushItemWidth(108);
-                char v_fmt[24];
-                if (g_ui.loot_min_value == 0) snprintf(v_fmt, sizeof(v_fmt), "all");
-                else                          snprintf(v_fmt, sizeof(v_fmt), "$%d", g_ui.loot_min_value);
-                ImGui::SliderInt("Min value##loot_minv",
-                                 &g_ui.loot_min_value, 0, 100000, v_fmt);
-                ImGui::PopItemWidth();
-            }
-#endif
-#ifdef DH_DEBUG
-            else if (s_tab == 4) {   // Overlay — debug only
-                row(tr("ov.hud"), tr("ov.hud.hint"), &g_ui.show_hud, NULL);
-            }
-            else if (s_tab == 5) {   // Language — debug index
-#else
-            else if (s_tab == 3) {   // Language — release index (after tabs collapse)
-                // Radio-row: three languages, applies on click, saved
-                // to g_ui.lang. tr() reads it live so UI relabels instantly.
-                struct L { int id; const char* key; };
-                const L langs[] = {
-                    { 0, "lang.en" },
-                    { 1, "lang.ru" },
-                    { 2, "lang.cn" },
-                };
-                for (int i = 0; i < 3; i++) {
-                    ImGui::SetCursorPosX(g_col_x);
-                    bool sel = (g_ui.lang == langs[i].id);
-                    if (ImGui::RadioButton(tr(langs[i].key), sel)) {
-                        g_ui.lang = langs[i].id;
-                    }
-                }
-            }
-#endif  // DH_DEBUG language-index switch
-
-            ImGui::EndChild();
-        }
-        ImGui::End();
-
-        ImGui::PopStyleVar(8);
-        ImGui::PopStyleColor(20);   // matches 20 PushStyleColor calls above
+        abi::menu_v3_pull(g_ui);
+        abi::render_menu_v3();
+        abi::menu_v3_push(g_ui);
     }
 
     // Auto-hide overlay when Delta is minimized. Polled once per frame here
@@ -2220,17 +1439,19 @@ extern "C" int OverlayRunImGui(void)
 
     if (!init_d3d()) { DestroyWindow(g_ui.hwnd); return 1; }
 
-    // shmem
+    // shmem — optional. Local UI-only builds skip the daemon so nothing
+    // publishes to Global\DeltaHackEsp. The panel still renders; only the
+    // world ESP and poll_thread stay idle (checked via g_ui.shmem == NULL).
     g_ui.hMap = OpenFileMappingW(FILE_MAP_READ, FALSE, DH_SHMEM_NAME);
     if (!g_ui.hMap) {
-        DH_ERROR("shmem not found — start daemon first (gle=%lu)",
-                 GetLastError());
-        return 2;
+        DH_WARN("shmem not found — running panel-only (gle=%lu)", GetLastError());
+        g_ui.shmem = NULL;
+    } else {
+        g_ui.shmem = (DH_SHMEM*)MapViewOfFile(g_ui.hMap, FILE_MAP_READ, 0, 0,
+                                              sizeof(DH_SHMEM));
+        if (!g_ui.shmem) { DH_WARN("MapViewOfFile — running panel-only"); }
+        else             { DH_INFO("shmem opened @ %p", g_ui.shmem); }
     }
-    g_ui.shmem = (DH_SHMEM*)MapViewOfFile(g_ui.hMap, FILE_MAP_READ, 0, 0,
-                                          sizeof(DH_SHMEM));
-    if (!g_ui.shmem) { DH_ERROR("MapViewOfFile"); return 3; }
-    DH_INFO("shmem opened @ %p", g_ui.shmem);
 
     // ImGui
     IMGUI_CHECKVERSION();
@@ -2294,13 +1515,108 @@ extern "C" int OverlayRunImGui(void)
     }
     if (!base) io.Fonts->AddFontDefault();
 
+    // ── menu_v3 Spectra font set — Unbounded (Latin+Cyrillic) + JetBrains Mono.
+    //    Loaded relative to CWD/EXE/DH_INSTALL_DIR (whichever wins) so KoenFlow
+    //    staged installs still find the TTFs. Baked at CSS-em × (ascent-descent)/
+    //    unitsPerEm × DPI so a "14 px" glyph renders at the same pixel size as
+    //    the mockup. FreeType rasterizer with LightHinting = sharp, no blur.
+    {
+        static char s_fbuf[8][MAX_PATH];
+        static int  s_fslot = 0;
+        auto exists_ = [](const char* p) { DWORD a = GetFileAttributesA(p); return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY); };
+        auto resolve_ = [&](const char* rel) -> const char* {
+            if (exists_(rel)) return rel;
+            char exe[MAX_PATH]; if (GetModuleFileNameA(NULL, exe, MAX_PATH)) {
+                char* sl = strrchr(exe, '\\'); if (sl) { *sl = 0;
+                    char* out = s_fbuf[s_fslot++ % 8];
+                    _snprintf_s(out, MAX_PATH, _TRUNCATE, "%s\\%s", exe, rel);
+                    if (exists_(out)) return out;
+                }
+            }
+            char ins[MAX_PATH];
+            if (GetEnvironmentVariableA("DH_INSTALL_DIR", ins, MAX_PATH)) {
+                char* out = s_fbuf[s_fslot++ % 8];
+                _snprintf_s(out, MAX_PATH, _TRUNCATE, "%s\\%s", ins, rel);
+                if (exists_(out)) return out;
+            }
+            return NULL;
+        };
+        auto em_to_line_ = [](const char* path) -> float {
+            FILE* fp = NULL; if (fopen_s(&fp, path, "rb") != 0 || !fp) return 1.0f;
+            fseek(fp, 0, SEEK_END); long n = ftell(fp); fseek(fp, 0, SEEK_SET);
+            if (n < 512) { fclose(fp); return 1.0f; }
+            std::vector<unsigned char> b((size_t)n);
+            fread(b.data(), 1, (size_t)n, fp); fclose(fp);
+            auto u16 = [&](size_t o) -> unsigned { return o + 1 >= b.size() ? 0u : (((unsigned)b[o] << 8) | (unsigned)b[o+1]); };
+            auto u32 = [&](size_t o) -> unsigned { return o + 3 >= b.size() ? 0u : (((unsigned)b[o] << 24) | ((unsigned)b[o+1] << 16) | ((unsigned)b[o+2] << 8) | (unsigned)b[o+3]); };
+            auto s16 = [&](size_t o) -> int { int v = (int)u16(o); return v < 0x8000 ? v : v - 0x10000; };
+            int num = (int)u16(4); if (num <= 0 || num > 64) return 1.0f;
+            size_t head_off = 0, hhea_off = 0;
+            for (int i = 0; i < num; ++i) { size_t tr = 12 + (size_t)i * 16; unsigned tag = u32(tr); unsigned off = u32(tr + 8);
+                if (tag == 0x68656164u) head_off = off; if (tag == 0x68686561u) hhea_off = off; }
+            if (!head_off || !hhea_off) return 1.0f;
+            unsigned upem = u16(head_off + 18); if (!upem) return 1.0f;
+            int line = s16(hhea_off + 4) - s16(hhea_off + 6) + s16(hhea_off + 8);
+            return line > 0 ? (float)line / (float)upem : 1.0f;
+        };
+        const char* kBold = resolve_("assets\\fonts\\Unbounded-Bold.ttf");
+        const char* kMed  = resolve_("assets\\fonts\\Unbounded-Medium.ttf");
+        const char* kReg  = resolve_("assets\\fonts\\Unbounded-Regular.ttf");
+        const char* kMono = resolve_("assets\\fonts\\JetBrainsMono-Medium.ttf");
+        if (!kBold) kBold = kMed ? kMed : kReg;
+        if (!kMed)  kMed  = kReg ? kReg : kBold;
+        if (!kMono) kMono = "C:\\Windows\\Fonts\\consola.ttf";
+
+        UINT dpi_raw = GetDpiForSystem();
+        float g_dpi = (float)dpi_raw / 96.0f;
+        if (g_dpi < 1.0f) g_dpi = 1.0f;
+        if (g_dpi > 3.0f) g_dpi = 3.0f;
+
+        struct GbFont { const char* file; float css; const char* name; };
+        const GbFont list[] = {
+            { kBold, 20.0f, "gb:ub700:20" }, { kBold, 12.0f, "gb:ub700:12" }, { kBold, 9.0f, "gb:ub700:9" },
+            { kBold, 14.0f, "gb:ub700:14" }, { kMed,  14.0f, "gb:ub500:14" },
+            { kMono, 12.0f, "gb:jb500:12" },
+        };
+        static const ImWchar ranges[] = {
+            0x0020, 0x00FF,   // Basic Latin + Latin-1
+            0x0400, 0x04FF,   // Cyrillic
+            0x2010, 0x2027,   // ellipsis + misc punctuation
+            0x00B7, 0x00B7,   // middot
+            0
+        };
+        for (const GbFont& f : list) {
+            if (!f.file) continue;
+            float k = em_to_line_(f.file);
+            float px = f.css * k * g_dpi;
+            ImFontConfig gfcfg;
+            gfcfg.MergeMode = false;
+            gfcfg.PixelSnapH = true;
+            gfcfg.OversampleH = 2;
+            gfcfg.OversampleV = 1;
+            gfcfg.RasterizerMultiply = 1.0f;
+            strncpy_s(gfcfg.Name, f.name, sizeof(gfcfg.Name) - 1);
+            io.Fonts->AddFontFromFileTTF(f.file, px, &gfcfg, ranges);
+        }
+        // menu_v3 draws in mockup pixels — multiplier passes DPI so 1px mockup == 1px physical.
+        abi::menu_v3_set_scale(g_dpi);
+    }
+
     ImGui::StyleColorsDark();
     // Global UI scale — panel widgets + font. Applied ONCE after style
     // reset. Overlay ESP text uses ImGui font so this scales that too.
     ImGui::GetStyle().ScaleAllSizes(g_ui.ui_scale);
     io.FontGlobalScale = g_ui.ui_scale;
+    // Enable FreeType rasterizer so the Unbounded/JBM baked faces render sharp.
+    io.Fonts->FontBuilderIO = ImGuiFreeType::GetBuilderForFreeType();
+    io.Fonts->FontBuilderFlags = ImGuiFreeTypeBuilderFlags_LightHinting;
+
     ImGui_ImplWin32_Init(g_ui.hwnd);
     ImGui_ImplDX11_Init(g_ui.d3d, g_ui.ctx);
+
+    // Rasterise the Spectra SVG icon atlas onto D3D11 SRVs — used by menu_v3
+    // for corner-position icons, rail icons, and gear glyphs.
+    abi::icons::init(g_ui.d3d, 32);
 
     // Decode embedded Nightvex logo PNG and upload to D3D11 texture
     {
@@ -2334,7 +1650,7 @@ extern "C" int OverlayRunImGui(void)
 
     // Poll thread
     g_ui.running = 1;
-    g_ui.poll_th = CreateThread(NULL, 0, poll_thread, NULL, 0, NULL);
+    g_ui.poll_th = g_ui.shmem ? CreateThread(NULL, 0, poll_thread, NULL, 0, NULL) : NULL;
 
     DH_INFO("overlay-imgui running: %dx%d â€” HWND=%p", g_ui.sw, g_ui.sh, g_ui.hwnd);
     timeBeginPeriod(1);
