@@ -26,6 +26,7 @@
 #include "../../deps/imgui/misc/freetype/imgui_freetype.h"
 #include "../dh_ui/menu_v3.hpp"
 #include "../dh_ui/icons.hpp"
+#include "../dh_ui/status_bar.hpp"
 #include <vector>
 
 // Embed stb_image just here (STB_IMAGE_IMPLEMENTATION only in this TU)
@@ -1252,6 +1253,11 @@ static void render_frame_inner()
     // Insert hotkey removed per user 2026-09-22 — Home only.
 
     // ---- Settings panel (ABI Nightvex layout: sidebar + row-cards) --------
+    // ---- Gamebreaker status pill (top-left, logo + PING + FPS) -----------
+    // Ping — no live source in DH yet (daemon has no server RTT), pass 0
+    // (renders as green "0" — acts as a placeholder till a real feed lands).
+    abi::hud::status_bar(g_ui.ui_scale, 0, ImGui::GetIO().Framerate);
+
     // ---- Settings panel — Spectra v3 Dark (menu_v3 port) --------------
     if (g_ui.panel_open) {
         abi::menu_v3_pull(g_ui);

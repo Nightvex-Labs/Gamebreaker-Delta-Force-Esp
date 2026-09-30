@@ -33,7 +33,7 @@ REM and pull in utf-8 Cyrillic string literals from the Spectra menu port.
 REM dh_system_spawn.c is the upstream SYSTEM-elevation fix — kept in main SRC.
 set SRC=src\main.c src\log.c src\dh_mz_wipe.c src\dh_diag.c src\dh_item_catalog.c src\db\dh_dbunpack.c src\svc\dh_scm.c src\winio\dh_phys.c src\winio\dh_prov_registry.c src\winio\dh_prov_impl.c src\mem\dh_rpm.c src\decrypt\dh_ace_decrypt.c src\decrypt\dh_vtbl_decrypt.c src\decrypt\dh_c280_decrypt.c src\decrypt\dh_unicorn_decrypt.c src\decrypt\dh_state_cache.c src\decrypt\dh_spray.c src\decrypt\dh_derive_key.c src\overlay\dh_daemon_esp.c src\hollow\dh_hollow.c src\hardening\dh_amsi_etw.c src\hardening\dh_syscalls.c src\hardening\dh_auth.c src\hardening\dh_system_spawn.c
 set OVERLAY_CPP=src\overlay\dh_overlay.cpp src\overlay\dh_overlay_imgui.cpp
-set DHUI_CPP=src\dh_ui\menu_v3.cpp src\dh_ui\icons.cpp
+set DHUI_CPP=src\dh_ui\menu_v3.cpp src\dh_ui\icons.cpp src\dh_ui\status_bar.cpp
 set IMGUI=deps\imgui\imgui.cpp deps\imgui\imgui_draw.cpp deps\imgui\imgui_tables.cpp deps\imgui\imgui_widgets.cpp deps\imgui\backends\imgui_impl_win32.cpp deps\imgui\backends\imgui_impl_dx11.cpp deps\imgui\misc\freetype\imgui_freetype.cpp
 set ASM=src\decrypt\vtbl_call_wrap.asm
 set ASM2=src\decrypt\vtbl_spray_wrap.asm
@@ -81,7 +81,7 @@ cl %DHUI_FLAGS% /c %OVERLAY_CPP% %DHUI_CPP% /Fo:build\
 if errorlevel 1 ( echo [build] DHUI FAILED & popd & exit /b 4 )
 
 echo [build] compiling %SRC% -^> %OUT%
-cl %CFLAGS% %SRC% build\vtbl_call_wrap.obj build\vtbl_spray_wrap.obj build\dh_syscalls_asm.obj build\imgui.obj build\imgui_draw.obj build\imgui_tables.obj build\imgui_widgets.obj build\imgui_impl_win32.obj build\imgui_impl_dx11.obj build\imgui_freetype.obj build\dh_overlay.obj build\dh_overlay_imgui.obj build\menu_v3.obj build\icons.obj /Fe:%OUT% /Fo:build\ %LFLAGS%
+cl %CFLAGS% %SRC% build\vtbl_call_wrap.obj build\vtbl_spray_wrap.obj build\dh_syscalls_asm.obj build\imgui.obj build\imgui_draw.obj build\imgui_tables.obj build\imgui_widgets.obj build\imgui_impl_win32.obj build\imgui_impl_dx11.obj build\imgui_freetype.obj build\dh_overlay.obj build\dh_overlay_imgui.obj build\menu_v3.obj build\icons.obj build\status_bar.obj /Fe:%OUT% /Fo:build\ %LFLAGS%
 if errorlevel 1 (
   echo [build] FAILED
   popd
