@@ -863,6 +863,10 @@ static void render_frame_inner()
         ImVec2 name_sz(0, 0);
         if (show_name && e.name[0]) {
             WideCharToMultiByte(CP_UTF8, 0, e.name, -1, name_buf, sizeof(name_buf), 0, 0);
+            // Bots in Delta ship with placeholder names ("AI", "AI_xxx",
+            // raw BP_ tags) — normalize to "Scav" per Maik's spec so the
+            // overlay reads as the community-standard extraction-shooter term.
+            if (e.is_bot) strcpy(name_buf, "Scav");
             name_sz = ImGui::CalcTextSize(name_buf);
         }
 
