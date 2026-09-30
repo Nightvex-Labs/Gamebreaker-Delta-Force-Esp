@@ -1447,10 +1447,11 @@ extern "C" int OverlayRunImGui(void)
     ShowWindow(g_ui.hwnd, SW_SHOWNOACTIVATE);
     SetWindowPos(g_ui.hwnd, HWND_TOPMOST, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    // Screen-capture protection TEMPORARILY OFF (screenshot review). Restore
-    // to WDA_EXCLUDEFROMCAPTURE before shipping — WDA_NONE means OBS/
-    // ShadowPlay/replays record the overlay and expose it to AC review.
-    SetWindowDisplayAffinity(g_ui.hwnd, WDA_NONE);
+    // Screen-capture protection ON — overlay invisible in OBS/ShadowPlay/
+    // AMD ReLive/Discord screenshare captures. Blocks the #1 external-cheat
+    // ban vector: user shares highlight → overlay visible in replay → AC
+    // gets report → HWID+account ban.
+    SetWindowDisplayAffinity(g_ui.hwnd, WDA_EXCLUDEFROMCAPTURE);
 
     if (!init_d3d()) { DestroyWindow(g_ui.hwnd); return 1; }
 
